@@ -260,45 +260,6 @@ pub fn filters_into_index_filters_unchecked(
         .collect::<Result<_>>()
 }
 
-fn condition_to_index_condition<F>(
-    filter: FilterCondition,
-    foreign_filter: &mut F,
-) -> Result<IndexFilterCondition>
-where
-    F: FnMut(FilterCondition) -> Result<IndexFilterCondition>,
-{
-    match filter {
-        FilterCondition::Not(filter) => condition_to_index_condition(*filter, foreign_filter)
-            .map(Box::new)
-            .map(IndexFilterCondition::Not),
-        FilterCondition::Condition { fid, op } => Ok(IndexFilterCondition::Condition { fid, op }),
-        FilterCondition::In { fid, els } => Ok(IndexFilterCondition::In { fid, els }),
-        FilterCondition::Or(filters) => filters
-            .into_iter()
-            .map(|filter| condition_to_index_condition(filter, foreign_filter))
-            .collect::<Result<_>>()
-            .map(IndexFilterCondition::Or),
-
-        FilterCondition::And(filters) => filters
-            .into_iter()
-            .map(|filter| condition_to_index_condition(filter, foreign_filter))
-            .collect::<Result<_>>()
-            .map(IndexFilterCondition::And),
-
-        FilterCondition::VectorExists { fid, embedder, filter } => {
-            Ok(IndexFilterCondition::VectorExists { fid, embedder, filter })
-        }
-        FilterCondition::GeoLowerThan { point, radius, resolution } => {
-            Ok(IndexFilterCondition::GeoLowerThan { point, radius, resolution })
-        }
-        FilterCondition::GeoBoundingBox { top_right_point, bottom_left_point } => {
-            Ok(IndexFilterCondition::GeoBoundingBox { top_right_point, bottom_left_point })
-        }
-        FilterCondition::GeoPolygon { points } => Ok(IndexFilterCondition::GeoPolygon { points }),
-        FilterCondition::Foreign { .. } => foreign_filter(filter),
-    }
-}
-
 /// Retrieve the foreign keys settings for a list of indexes
 ///
 /// This function will open each index once and retrieve the foreign keys settings.

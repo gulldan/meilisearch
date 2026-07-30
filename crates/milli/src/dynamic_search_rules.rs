@@ -1,5 +1,5 @@
 use std::num::Saturating;
-use std::ops::{Bound, ControlFlow};
+use std::ops::{Bound, ControlFlow, Not as _};
 
 use filter_parser::{
     ConstraintCondition, ConstraintConditionKind, ConstraintTarget, FilterConstraintFuel,
@@ -20,8 +20,8 @@ use crate::search::new::LocatedQueryTerm;
 use crate::search::{Pin, Precedence};
 use crate::update::new::document::DocumentFromDb;
 use crate::{
-    AscDesc, DocumentId, FieldId, FieldsIdsMap, Index, IndexFilter, PinDoc, Result, SearchContext,
-    SearchResult, UserError, MAX_COUNTED_WORDS,
+    AscDesc, AttributePatterns, DocumentId, FieldId, FieldsIdsMap, Filter, Index, IndexFilter,
+    PatternMatch, PinDoc, Result, SearchContext, SearchResult, UserError, MAX_COUNTED_WORDS,
 };
 
 pub type RuleId = u32;
@@ -208,10 +208,12 @@ impl<'a> DynamicSearchRulesView<'a> {
                     }
                 };
 
-                let actions: Result<Vec<RuleAction>, serde_json::Error> =
+                let actions: Result<RuleActions, serde_json::Error> =
                     serde_json::from_str(actions.get());
                 match actions {
-                    Ok(actions) => Ok(Some(actions.into_iter().zip(std::iter::repeat(precedence)))),
+                    Ok(actions) => {
+                        Ok(Some(actions.pin.into_iter().zip(std::iter::repeat(precedence))))
+                    }
                     Err(err) => {
                         tracing::warn!(
                         "could not deserialize actions of rule with internal id `{rule_id}`: {err}"
@@ -230,11 +232,8 @@ impl<'a> DynamicSearchRulesView<'a> {
                     Ok(doc_id) => doc_id,
                     Err(err) => return Some(Err(err)),
                 };
-                match action.action {
-                    DynamicSearchRuleAction::Pin { position } => {
-                        Some(Ok(PinDoc { position, precedence, id: doc_id }))
-                    }
-                }
+
+                Some(Ok(PinDoc { position: action.position, precedence, id: doc_id }))
             })
             .map(|x| x.flatten())
     }
@@ -733,46 +732,6 @@ impl DynamicSearchRules {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RuleAction {
-    /// Target document selector for this action.
-    pub selector: Selector,
-    // Use Object here because utoipa's tagged-enum schema generation combines
-    // allOf with additionalProperties: false in a way that Spectral rejects.
-    /// Action payload to apply to the selected document.
-    pub action: DynamicSearchRuleAction,
-}
-
-impl RuleAction {
-    fn active_document(&self, search_context: &SearchContext<'_>) -> Result<Option<DocumentId>> {
-        if self.selector.index_uid.as_ref().is_some_and(|selector_index_uid| {
-            selector_index_uid.as_str() != search_context.index_uid
-        }) {
-            return Ok(None);
-        }
-
-        Ok(search_context
-            .index
-            .external_documents_ids()
-            .get(search_context.txn, &self.selector.id)?)
-    }
-}
-
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Selector {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub index_uid: Option<String>,
-    pub id: String,
-}
-
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
-enum DynamicSearchRuleAction {
-    Pin { position: u32 },
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct DsrFuel {
     max_counted_words: u8,
@@ -852,4 +811,185 @@ pub mod fields {
     pub const CONDITIONS_QUERY_WORDS: &str = "conditions.query.words";
     pub const CONDITIONS_FILTER_NB_CONSTRAINTS: &str = "conditions.filter.nbConstraints";
     pub const CONDITIONS_FILTER_VALUES: &str = "conditions.filter.values";
+}
+
+/// List of actions to apply when this rule is active for the query.
+#[routes::request(proxied, db, setting, no_error)]
+pub struct RuleActions {
+    /// Pins a selected document.
+    #[request(default)]
+    pub pin: Vec<PinAction>,
+    /// Applies a multiplicative factor to the score of selected documents.
+    #[request(default)]
+    pub scale: Vec<ScaleAction>,
+}
+
+/// An action that pins a selected document.
+#[routes::request(proxied, db, setting, no_error)]
+pub struct PinAction {
+    /// List of index patterns.
+    ///
+    /// For the action to select any document, when this parameter is provided,
+    /// the index of the query must match at least one pattern from the query.
+    #[request(default)]
+    pub index_uids: Option<AttributePatterns>,
+    /// Document ID of the document to select.
+    ///
+    /// Only the document whose [primary key](https://www.meilisearch.com/docs/learn/getting_started/primary_key) value
+    /// matches the specified id will be selected by the action.
+    ///
+    /// If there is no such document in the index of the query, then no documents will be selected and no pinning will occur.
+    #[request(required)]
+    pub id: String,
+    /// Position at which the document should be pinned.
+    #[request(required)]
+    pub position: u32,
+}
+
+impl PinAction {
+    pub fn active_document(
+        &self,
+        search_context: &SearchContext<'_>,
+    ) -> Result<Option<DocumentId>> {
+        if let Some(patterns) = &self.index_uids {
+            if !matches!(patterns.match_str(search_context.index_uid), PatternMatch::Match) {
+                return Ok(None);
+            }
+        }
+
+        Ok(search_context.index.external_documents_ids().get(search_context.txn, &self.id)?)
+    }
+}
+
+/// An action that applies a multiplicative factor to the score of selected documents.
+#[routes::request(proxied, db, setting, no_error)]
+pub struct ScaleAction {
+    /// List of index patterns.
+    ///
+    /// For the action to select any document, when this parameter is provided,
+    /// the index of the query must match at least one pattern from the query.
+    #[request(default)]
+    pub index_uids: Option<AttributePatterns>,
+    /// Array of specific document IDs to select.
+    ///
+    /// Only documents whose [primary key](https://www.meilisearch.com/docs/learn/getting_started/primary_key) value
+    /// matches the specified ids will be selected by the action.
+    ///
+    /// If `filter` is also specified,
+    /// the documents must also satisfy the filter to be selected.
+    #[request(default)]
+    pub ids: Option<Vec<String>>,
+    /// Filter expression to select documents. Attributes must be added to the
+    /// `filterableAttributes` index setting before they can be used in filters.
+    /// Accepts a string or an array of arrays of strings for AND/OR combinations.
+    ///
+    /// Only documents matching the specified filter will be selected.
+    ///
+    /// If `ids` is also specified,
+    /// the documents matching the filter must also have their primary key part of the `ids`
+    /// list to be selected.
+    ///
+    /// If the filter cannot be evaluated for the current index due to referencing attributes
+    /// that are not filterable, then no document will be applied for this action.
+    #[request(default)]
+    pub filter: Option<serde_json::Value>,
+    /// Scale factor for selected documents.
+    ///
+    /// - Set it >1.0 to boost the selected documents.
+    /// - Set it <1.0 to deboost the selected documents.
+    /// - Set it =0.0 to hide the selected documents.
+    #[request(required)]
+    pub weight: f64,
+}
+
+impl ScaleAction {
+    pub fn active_documents(
+        &self,
+        search_context: &SearchContext<'_>,
+    ) -> Result<Option<RoaringBitmap>> {
+        if let Some(patterns) = &self.index_uids {
+            if !matches!(patterns.match_str(search_context.index_uid), PatternMatch::Match) {
+                return Ok(None);
+            }
+        }
+
+        Ok(match (&self.ids, &self.filter) {
+            (None, None) => None,
+            (None, Some(filter)) => {
+                let Ok(filter) = Filter::from_json(filter) else {
+                    tracing::warn!("cannot parse filter for DSR");
+                    return Ok(None);
+                };
+
+                let Some(filter) = filter else { return Ok(None) };
+                wip::fixme!("check that the filter doesn't contain any foreign + is parseable at rule update time");
+                let Ok(filter) = IndexFilter::from_filter_without_foreign(filter, ()) else {
+                    tracing::warn!("filter for DSR contains foreign");
+                    return Ok(None);
+                };
+
+                wip::fixme!("ignore errors stemming from index misconfiguration");
+
+                let candidates = filter.evaluate(
+                    search_context.txn,
+                    search_context.index,
+                    search_context.fields_ids_map,
+                )?;
+
+                if candidates.is_empty() {
+                    None
+                } else {
+                    Some(candidates)
+                }
+            }
+            (Some(ids), None) => {
+                let candidates = candidates_from_ids(search_context, ids)?;
+                candidates.is_empty().not().then_some(candidates)
+            }
+            (Some(ids), Some(filter)) => {
+                let mut candidates = candidates_from_ids(search_context, ids)?;
+                if candidates.is_empty() {
+                    return Ok(None);
+                }
+                let Ok(filter) = Filter::from_json(filter) else {
+                    tracing::warn!("cannot parse filter for DSR");
+                    return Ok(None);
+                };
+
+                let Some(filter) = filter else { return Ok(Some(candidates)) };
+                wip::fixme!("check that the filter doesn't contain any foreign + is parseable at rule update time");
+                let Ok(filter) = IndexFilter::from_filter_without_foreign(filter, ()) else {
+                    tracing::warn!("filter for DSR contains foreign");
+                    return Ok(None);
+                };
+
+                candidates &= filter.evaluate(
+                    search_context.txn,
+                    search_context.index,
+                    search_context.fields_ids_map,
+                )?;
+
+                if candidates.is_empty() {
+                    None
+                } else {
+                    Some(candidates)
+                }
+            }
+        })
+    }
+}
+
+fn candidates_from_ids(
+    search_context: &SearchContext<'_>,
+    ids: &[String],
+) -> Result<RoaringBitmap> {
+    let mut candidates = RoaringBitmap::new();
+    for id in ids {
+        let Some(id) = search_context.index.external_documents_ids().get(search_context.txn, id)?
+        else {
+            continue;
+        };
+        candidates.push(id);
+    }
+    Ok(candidates)
 }

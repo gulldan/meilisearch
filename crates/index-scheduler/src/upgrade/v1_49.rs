@@ -1,7 +1,6 @@
 use meilisearch_types::dynamic_search_rules::{
     Conditions as NewConditions, DynamicSearchRule as NewDynamicSearchRule,
-    DynamicSearchRuleAction as NewDynamicSearchRuleAction, QueryCondition,
-    RuleAction as NewRuleAction, RuleUid, Selector as NewSelector, TimeCondition,
+    QueryCondition, RuleUid, TimeCondition,
 };
 use meilisearch_types::heed::types::{SerdeJson, Str};
 use meilisearch_types::heed::{Database, Env, RwTxn, WithoutTls};

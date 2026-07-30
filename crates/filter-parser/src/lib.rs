@@ -319,6 +319,49 @@ impl IndexFilterCondition {
     pub fn fids(&self, depth: usize) -> impl Iterator<Item = &Token> {
         FidIter { stack: vec![(depth, self)] }
     }
+
+    pub fn from_filter_condition<E, F>(
+        condition: FilterCondition,
+        on_foreign_filter: &mut F,
+    ) -> Result<IndexFilterCondition, E>
+    where
+        F: FnMut(FilterCondition) -> Result<IndexFilterCondition, E>,
+    {
+        match condition {
+            FilterCondition::Not(filter) => Self::from_filter_condition(*filter, on_foreign_filter)
+                .map(Box::new)
+                .map(IndexFilterCondition::Not),
+            FilterCondition::Condition { fid, op } => {
+                Ok(IndexFilterCondition::Condition { fid, op })
+            }
+            FilterCondition::In { fid, els } => Ok(IndexFilterCondition::In { fid, els }),
+            FilterCondition::Or(filters) => filters
+                .into_iter()
+                .map(|filter| Self::from_filter_condition(filter, on_foreign_filter))
+                .collect::<Result<_, E>>()
+                .map(IndexFilterCondition::Or),
+
+            FilterCondition::And(filters) => filters
+                .into_iter()
+                .map(|filter| Self::from_filter_condition(filter, on_foreign_filter))
+                .collect::<Result<_, E>>()
+                .map(IndexFilterCondition::And),
+
+            FilterCondition::VectorExists { fid, embedder, filter } => {
+                Ok(IndexFilterCondition::VectorExists { fid, embedder, filter })
+            }
+            FilterCondition::GeoLowerThan { point, radius, resolution } => {
+                Ok(IndexFilterCondition::GeoLowerThan { point, radius, resolution })
+            }
+            FilterCondition::GeoBoundingBox { top_right_point, bottom_left_point } => {
+                Ok(IndexFilterCondition::GeoBoundingBox { top_right_point, bottom_left_point })
+            }
+            FilterCondition::GeoPolygon { points } => {
+                Ok(IndexFilterCondition::GeoPolygon { points })
+            }
+            FilterCondition::Foreign { .. } => on_foreign_filter(condition),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -40,6 +40,28 @@ impl From<IndexFilterCondition> for IndexFilter {
 }
 
 impl IndexFilter {
+    pub fn from_filter<E, F>(filter: crate::Filter, on_foreign_filter: &mut F) -> Result<Self, E>
+    where
+        F: FnMut(crate::FilterCondition) -> Result<IndexFilterCondition, E>,
+    {
+        Ok(Self {
+            condition: IndexFilterCondition::from_filter_condition(
+                filter.condition,
+                on_foreign_filter,
+            )?,
+        })
+    }
+
+    pub fn from_filter_without_foreign<E>(
+        filter: crate::Filter,
+        error_on_foreign: E,
+    ) -> Result<Self, E> {
+        let mut slot = Some(error_on_foreign);
+        // unwrap: this relies on the short-circuiting behavior of `from_filter_condition`
+        // the error is unwrapped once and immediately returned on the first error
+        Self::from_filter(filter, &mut  |_| Err(slot.take().unwrap()))
+    }
+
     pub fn evaluate(
         &self,
         rtxn: &heed::RoTxn<'_>,
