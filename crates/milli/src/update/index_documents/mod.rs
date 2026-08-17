@@ -489,6 +489,9 @@ where
         // We write the field distribution into the main database
         self.index.put_field_distribution(self.wtxn, &field_distribution)?;
 
+        // Everything that reaches this indexer has just been tokenized.
+        self.index.put_lemmatizer_generations(self.wtxn, &crate::lemmatizer::generations())?;
+
         // We write the primary key field id into the main database
         self.index.put_primary_key(self.wtxn, &primary_key)?;
         let number_of_documents = self.index.number_of_documents(self.wtxn)?;

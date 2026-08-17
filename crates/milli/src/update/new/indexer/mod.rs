@@ -241,6 +241,10 @@ where
         field_distribution,
         document_ids,
     )?;
+    // Stamped where documents are tokenized rather than inside `update_index`:
+    // a settings update that needs no reindexing writes no word, and must not
+    // claim the stored ones came from the dictionaries loaded now.
+    index.put_lemmatizer_generations(wtxn, &crate::lemmatizer::generations())?;
 
     Ok(congestion)
 }
@@ -458,6 +462,7 @@ where
         field_distribution,
         document_ids,
     )?;
+    index.put_lemmatizer_generations(wtxn, &crate::lemmatizer::generations())?;
 
     Ok(congestion)
 }
