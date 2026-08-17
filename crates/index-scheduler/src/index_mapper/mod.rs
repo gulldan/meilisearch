@@ -8,6 +8,7 @@ use meilisearch_types::heed::{Database, Env, RoTxn, RwTxn, WithoutTls};
 use meilisearch_types::index_uid::{AnyIndex, DsrIndex, UserIndex, RESERVED_UID_PREFIX};
 use meilisearch_types::milli::database_stats::DatabaseStats;
 use meilisearch_types::milli::index::RollbackOutcome;
+use meilisearch_types::milli::lemmatizer::Generations;
 use meilisearch_types::milli::sharding::Shards;
 use meilisearch_types::milli::update::IndexerConfig;
 use meilisearch_types::milli::{self, CreateOrOpen, FieldDistribution, Index};
@@ -136,6 +137,11 @@ pub struct IndexStats {
     pub primary_key: Option<String>,
     /// Association of every field name with the number of times it occurs in the documents.
     pub field_distribution: FieldDistribution,
+    /// Generation of every lemmatizer dictionary that filled the index, keyed by
+    /// ISO 639-3 code. `None` for an index last written before they were
+    /// recorded, empty for one filled without dictionaries.
+    #[serde(default)]
+    pub lemmatizer_generations: Option<Generations>,
     /// Creation date of the index.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -173,6 +179,7 @@ impl IndexStats {
             used_database_size: index.used_size()?,
             primary_key: index.primary_key(rtxn)?.map(|s| s.to_string()),
             field_distribution: index.field_distribution(rtxn)?,
+            lemmatizer_generations: index.lemmatizer_generations(rtxn)?,
             created_at: index.created_at(rtxn)?,
             updated_at: index.updated_at(rtxn)?,
         })
@@ -479,6 +486,10 @@ impl IndexMapper {
                 }
             }
         };
+
+        index
+            .check_lemmatizer_generations(name)
+            .map_err(|error| Error::from_milli(error, Some(name.to_string())))?;
 
         Ok(index)
     }

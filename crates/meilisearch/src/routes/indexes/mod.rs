@@ -598,6 +598,12 @@ pub struct IndexStats {
     /// the documents.
     #[schema(value_type = HashMap<String, u64>)]
     pub field_distribution: FieldDistribution,
+    /// Generation of every lemmatizer dictionary that filled the index, keyed
+    /// by ISO 639-3 code. Absent from an index written before they were
+    /// recorded, empty for one filled without dictionaries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<HashMap<String, String>>)]
+    pub lemmatizer_generations: Option<milli::lemmatizer::Generations>,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserr, ToSchema)]
@@ -632,6 +638,7 @@ impl IndexStats {
                     field_distribution,
                     created_at: _,
                     updated_at: _,
+                    lemmatizer_generations,
                 },
         } = db_index_stats;
 
@@ -654,6 +661,7 @@ impl IndexStats {
             number_of_embeddings,
             number_of_embedded_documents,
             field_distribution,
+            lemmatizer_generations,
         }
     }
 }

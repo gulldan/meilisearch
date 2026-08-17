@@ -26,6 +26,7 @@ use crate::heed_codec::facet::{
 };
 use crate::heed_codec::version::VersionCodec;
 use crate::heed_codec::{BEU16StrCodec, FstSetCodec, StrBEU16Codec, StrRefCodec, SynonymsKeyCodec};
+use crate::lemmatizer::Generations;
 use crate::order_by_map::OrderByMap;
 use crate::progress::Progress;
 use crate::prompt::PromptData;
@@ -91,6 +92,7 @@ pub mod main_key {
     pub const DISABLED_TYPOS_TERMS: &str = "disabled_typos_terms";
     pub const CHAT: &str = "chat";
     pub const VECTOR_STORE_BACKEND: &str = "vector_store_backend";
+    pub const LEMMATIZER_GENERATIONS: &str = "lemmatizer_generations";
 }
 
 pub mod db_name {
@@ -1828,6 +1830,38 @@ impl Index {
         txn: &mut RwTxn<'_>,
     ) -> heed::Result<bool> {
         self.main.remap_key_type::<Str>().delete(txn, main_key::LOCALIZED_ATTRIBUTES_RULES)
+    }
+
+    /// The lemmatizer dictionaries the words of this index were produced by.
+    ///
+    /// `None` for an index last written before they were recorded: unknown, not
+    /// empty. An index filled without dictionaries records the empty set.
+    pub fn lemmatizer_generations(&self, rtxn: &RoTxn<'_>) -> heed::Result<Option<Generations>> {
+        self.main
+            .remap_types::<Str, SerdeJson<Generations>>()
+            .get(rtxn, main_key::LEMMATIZER_GENERATIONS)
+    }
+
+    pub(crate) fn put_lemmatizer_generations(
+        &self,
+        wtxn: &mut RwTxn<'_>,
+        generations: &Generations,
+    ) -> heed::Result<()> {
+        self.main.remap_types::<Str, SerdeJson<Generations>>().put(
+            wtxn,
+            main_key::LEMMATIZER_GENERATIONS,
+            generations,
+        )
+    }
+
+    /// Warns once per process when this index was filled by dictionaries other
+    /// than the loaded ones. Searching it is never refused: a swapped bundle is
+    /// worth shouting about, not worth taking an index offline for.
+    pub fn check_lemmatizer_generations(&self, uid: &str) -> Result<()> {
+        crate::lemmatizer::check_index(uid, || {
+            let rtxn = self.read_txn()?;
+            Ok(self.lemmatizer_generations(&rtxn)?)
+        })
     }
 
     pub(crate) fn put_search_cutoff(&self, wtxn: &mut RwTxn<'_>, cutoff: u64) -> heed::Result<()> {
