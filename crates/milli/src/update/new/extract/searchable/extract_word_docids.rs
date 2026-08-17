@@ -482,6 +482,12 @@ impl WordDocidsExtractors {
 
         // old tokenizer
         let mut tokenizer_builder = charabia::TokenizerBuilder::new();
+
+        // Переиндексация по смене настроек строит свои токенизаторы, и лемматизатор
+        // нужен обоим: иначе документы перестраиваются без лемм, а запрос их ждёт.
+        if let Some(lemmatizer) = crate::lemmatizer::get() {
+            tokenizer_builder.lemmatizer(lemmatizer);
+        }
         if let Some(stop_words) = old_stop_words {
             tokenizer_builder.stop_words(stop_words);
         }
@@ -502,6 +508,9 @@ impl WordDocidsExtractors {
         };
 
         let mut new_tokenizer_builder = charabia::TokenizerBuilder::new();
+        if let Some(lemmatizer) = crate::lemmatizer::get() {
+            new_tokenizer_builder.lemmatizer(lemmatizer);
+        }
         let new_dictionary_vec: Vec<_>;
         let new_separators_vec: Vec<_>;
         let new_tokenizer;
