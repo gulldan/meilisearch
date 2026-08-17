@@ -296,6 +296,8 @@ impl Infos {
             indexer_options,
             config_file_path,
             no_analytics: _,
+            // Not reported: it says what is installed on the host.
+            experimental_lemmatizer_dir: _,
             experimental_personalization_api_key,
             s3_snapshot_options,
         } = options;

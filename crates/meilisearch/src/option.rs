@@ -75,6 +75,7 @@ const MEILI_EXPERIMENTAL_PERSONALIZATION_API_KEY: &str =
     "MEILI_EXPERIMENTAL_PERSONALIZATION_API_KEY";
 
 const MEILI_EXPERIMENTAL_ALLOWED_IP_NETWORKS: &str = "MEILI_EXPERIMENTAL_ALLOWED_IP_NETWORKS";
+const MEILI_EXPERIMENTAL_LEMMATIZER_DIR: &str = "MEILI_EXPERIMENTAL_LEMMATIZER_DIR";
 
 // Related to S3 snapshots
 const MEILI_S3_BUCKET_URL: &str = "MEILI_S3_BUCKET_URL";
@@ -511,6 +512,15 @@ pub struct Opt {
     #[serde(default)]
     pub experimental_allowed_ip_networks: Vec<cidr::AnyIpCidr>,
 
+    /// Experimental lemmatization.
+    ///
+    /// Sets the directory holding the udlex dictionaries, one per language.
+    /// Documents and queries of an index are then reduced to lemmas, provided
+    /// the index declares the language of its fields through
+    /// `localizedAttributes`.
+    #[clap(long, env = MEILI_EXPERIMENTAL_LEMMATIZER_DIR)]
+    pub experimental_lemmatizer_dir: Option<PathBuf>,
+
     #[serde(flatten)]
     #[clap(flatten)]
     pub indexer_options: IndexerOpts,
@@ -622,6 +632,7 @@ impl Opt {
             experimental_embedding_cache_entries,
             experimental_personalization_api_key,
             experimental_allowed_ip_networks,
+            experimental_lemmatizer_dir,
             s3_snapshot_options,
         } = self;
         export_to_env_if_not_present(MEILI_DB_PATH, db_path);
@@ -726,6 +737,13 @@ impl Opt {
             export_to_env_if_not_present(
                 MEILI_EXPERIMENTAL_PERSONALIZATION_API_KEY,
                 experimental_personalization_api_key,
+            );
+        }
+
+        if let Some(experimental_lemmatizer_dir) = experimental_lemmatizer_dir {
+            export_to_env_if_not_present(
+                MEILI_EXPERIMENTAL_LEMMATIZER_DIR,
+                experimental_lemmatizer_dir,
             );
         }
 

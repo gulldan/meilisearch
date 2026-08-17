@@ -2246,6 +2246,10 @@ impl<'a> HitMaker<'a> {
         let mut tokenizer_builder = TokenizerBuilder::default();
         tokenizer_builder.create_char_map(true);
 
+        if let Some(lemmatizer) = milli::lemmatizer::get() {
+            tokenizer_builder.lemmatizer(lemmatizer);
+        }
+
         if let Some(separators) = separators {
             tokenizer_builder.separators(separators);
         }

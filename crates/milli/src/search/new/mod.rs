@@ -946,6 +946,10 @@ pub fn extract_tokens(
         tokbuilder.words_dict(dictionary);
     }
 
+    if let Some(lemmatizer) = crate::lemmatizer::get() {
+        tokbuilder.lemmatizer(lemmatizer);
+    }
+
     let db_locales;
     match locales {
         Some(locales) => {
@@ -992,7 +996,7 @@ pub fn extract_tokens(
     let tokens = tokenizer.tokenize(query);
     drop(entered);
 
-    located_query_terms_from_tokens(ctx, &tokenizer, tokens, words_limit)
+    located_query_terms_from_tokens(ctx, &tokenizer, query, tokens, words_limit)
 }
 
 pub(crate) fn check_sort_criteria(

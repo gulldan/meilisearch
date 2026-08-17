@@ -10,6 +10,7 @@ use std::time::Duration;
 use actix_web::http::KeepAlive;
 use actix_web::web::Data;
 use actix_web::HttpServer;
+use anyhow::Context as _;
 use index_scheduler::IndexScheduler;
 use is_terminal::IsTerminal;
 use meilisearch::analytics::Analytics;
@@ -21,6 +22,7 @@ use meilisearch::{
     LogStderrType, Opt, ServicesData, SubscriberForSecondLayer,
 };
 use meilisearch_auth::{generate_master_key, AuthController, MASTER_KEY_MIN_SIZE};
+use meilisearch_types::milli::lemmatizer;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -124,6 +126,20 @@ async fn try_main(runtime: tokio::runtime::Handle) -> anyhow::Result<()> {
         }
         // No error; continue
         _ => (),
+    }
+
+    if let Some(directory) = opt.experimental_lemmatizer_dir.as_deref() {
+        let lemmatizer = lemmatizer::Lemmatizer::open(directory).with_context(|| {
+            format!("while opening the dictionaries in {}", directory.display())
+        })?;
+        let languages = lemmatizer.languages().count();
+        anyhow::ensure!(
+            languages > 0,
+            "No dictionary found in {}. It must be a udlex bundle directory.",
+            directory.display()
+        );
+        tracing::info!("Lemmatizing with {languages} dictionaries");
+        lemmatizer::configure(lemmatizer);
     }
 
     let (index_scheduler, auth_controller) = setup_meilisearch(&opt, runtime)?;

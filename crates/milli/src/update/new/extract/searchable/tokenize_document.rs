@@ -173,6 +173,10 @@ pub fn tokenizer_builder<'a>(
         tokenizer_builder.separators(separators);
     }
 
+    if let Some(lemmatizer) = crate::lemmatizer::get() {
+        tokenizer_builder.lemmatizer(lemmatizer);
+    }
+
     tokenizer_builder
 }
 
