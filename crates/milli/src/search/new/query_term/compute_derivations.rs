@@ -252,6 +252,31 @@ pub fn partially_initialized_term_from_word(
     })
 }
 
+/// Term for the last word of a query once lemmatization has changed it.
+///
+/// The index holds lemmas, so the lemma is what matches whole words; the
+/// surface form is what the user is still typing, so it is the one that keeps
+/// prefix search alive.
+pub fn partially_initialized_term_from_lemma(
+    ctx: &mut SearchContext<'_>,
+    tokenizer: &Tokenizer<'_>,
+    lemma: &str,
+    surface: &str,
+    max_typo: u8,
+) -> Result<QueryTerm> {
+    let mut term =
+        partially_initialized_term_from_word(ctx, tokenizer, lemma, max_typo, false, false)?;
+    let from_surface =
+        partially_initialized_term_from_word(ctx, tokenizer, surface, max_typo, true, false)?;
+
+    term.zero_typo.prefix_of.extend(from_surface.zero_typo.exact);
+    term.zero_typo.prefix_of.extend(from_surface.zero_typo.prefix_of);
+    term.zero_typo.synonyms.extend(from_surface.zero_typo.synonyms);
+    term.zero_typo.use_prefix_db = from_surface.zero_typo.use_prefix_db;
+
+    Ok(term)
+}
+
 fn find_split_words(ctx: &mut SearchContext<'_>, word: &str) -> Result<Option<Interned<Phrase>>> {
     if let Some((l, r)) = split_best_frequency(ctx, word)? {
         Ok(Some(ctx.phrase_interner.insert(Phrase { words: vec![Some(l), Some(r)] })))

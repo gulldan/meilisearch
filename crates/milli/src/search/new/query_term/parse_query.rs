@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
 
-use charabia::normalizer::NormalizedTokenIter;
-use charabia::{SeparatorKind, TokenKind, Tokenizer};
+use charabia::normalizer::{NormalizedTokenIter, NormalizerOption};
+use charabia::{Normalize as _, SeparatorKind, Token, TokenKind, Tokenizer};
 
-use super::compute_derivations::partially_initialized_term_from_word;
+use super::compute_derivations::{
+    partially_initialized_term_from_lemma, partially_initialized_term_from_word,
+};
 use super::{LocatedQueryTerm, ZeroTypoTerm};
 use crate::search::new::query_graph::QueryGraph;
 use crate::search::new::query_term::{Lazy, Phrase, QueryTerm};
@@ -23,11 +25,21 @@ pub struct ExtractedTokens {
     pub negative_phrases: Vec<LocatedQueryTerm>,
 }
 
+/// Normalization of a query word without the lemmatizer, to recover the form
+/// the user actually typed.
+const PREFIX_NORMALIZER_OPTION: NormalizerOption = NormalizerOption {
+    create_char_map: false,
+    lossy: true,
+    classifier: charabia::normalizer::ClassifierOption { stop_words: None, separators: None },
+    lemmatizer: None,
+};
+
 /// Convert the tokenised search query into a list of located query terms.
 #[tracing::instrument(level = "trace", skip_all, target = "search::query")]
 pub fn located_query_terms_from_tokens(
     ctx: &mut SearchContext<'_>,
     tokenizer: &Tokenizer<'_>,
+    original: &str,
     query: NormalizedTokenIter<'_, '_, '_, '_>,
     words_limit: Option<usize>,
 ) -> Result<ExtractedTokens> {
@@ -98,14 +110,44 @@ pub fn located_query_terms_from_tokens(
                     }
                 } else {
                     let word = token.lemma();
-                    let term = partially_initialized_term_from_word(
-                        ctx,
-                        tokenizer,
-                        word,
-                        nbr_typos(word),
-                        allow_prefix_search,
-                        false,
-                    )?;
+                    // The last word is searched as a prefix because the user may
+                    // still be typing it. Lemmatization would take that prefix
+                    // away, so the surface form is kept alongside the lemma:
+                    // `мыши` has to find `мышь` and still grow into `мышиный`.
+                    // The surface form goes through the very same pipeline
+                    // minus the lemmatizer, script and language included, so
+                    // that a word the lemmatizer left alone compares equal.
+                    let surface = allow_prefix_search
+                        .then(|| original.get(token.byte_start..token.byte_end))
+                        .flatten()
+                        .map(|surface| {
+                            Token {
+                                lemma: std::borrow::Cow::Borrowed(surface),
+                                script: token.script,
+                                language: token.language,
+                                ..Default::default()
+                            }
+                            .normalize(&PREFIX_NORMALIZER_OPTION)
+                            .lemma
+                        })
+                        .filter(|surface| surface.as_ref() != word);
+                    let term = match surface {
+                        Some(surface) => partially_initialized_term_from_lemma(
+                            ctx,
+                            tokenizer,
+                            word,
+                            surface.as_ref(),
+                            nbr_typos(word),
+                        )?,
+                        None => partially_initialized_term_from_word(
+                            ctx,
+                            tokenizer,
+                            word,
+                            nbr_typos(word),
+                            allow_prefix_search,
+                            false,
+                        )?,
+                    };
                     let located_term = LocatedQueryTerm {
                         value: ctx.term_interner.push(term),
                         positions: position..=position,
@@ -386,7 +428,8 @@ mod tests {
     fn start_with_hard_separator() -> Result<()> {
         let mut builder = TokenizerBuilder::default();
         let tokenizer = builder.build();
-        let tokens = tokenizer.tokenize(".");
+        let query = ".";
+        let tokens = tokenizer.tokenize(query);
         let index = temp_index_with_documents();
         let rtxn = index.read_txn()?;
         let fields_ids_map = index.fields_ids_map(&rtxn)?;
@@ -399,7 +442,7 @@ mod tests {
         )?;
         // panics with `attempt to add with overflow` before <https://github.com/meilisearch/meilisearch/issues/3785>
         let ExtractedTokens { query_terms, .. } =
-            located_query_terms_from_tokens(&mut ctx, &tokenizer, tokens, None)?;
+            located_query_terms_from_tokens(&mut ctx, &tokenizer, query, tokens, None)?;
         assert!(query_terms.is_empty());
 
         Ok(())
