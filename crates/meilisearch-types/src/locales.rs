@@ -41,12 +41,17 @@ impl From<LocalizedAttributesRuleView> for LocalizedAttributesRule {
 ///
 /// this enum implements `Deserr` in order to be used in the API.
 macro_rules! make_locale {
-    ($(($iso_639_1:ident, $iso_639_1_str:expr) => ($iso_639_3:ident, $iso_639_3_str:expr),)+) => {
+    (
+        $(($iso_639_1:ident, $iso_639_1_str:expr) => ($iso_639_3:ident, $iso_639_3_str:expr),)+ ;
+        // Languages that have no ISO 639-1 code at all.
+        $($only_639_3:ident => $only_639_3_str:expr,)+
+    ) => {
         #[routes::request(no_error, setting)]
         #[derive(Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
         pub enum Locale {
             $($iso_639_1,)+
             $($iso_639_3,)+
+            $($only_639_3,)+
             Cmn,
         }
 
@@ -54,6 +59,7 @@ macro_rules! make_locale {
             fn from(other: milli::tokenizer::Language) -> Locale {
                 match other {
                     $(milli::tokenizer::Language::$iso_639_3 => Locale::$iso_639_3,)+
+                    $(milli::tokenizer::Language::$only_639_3 => Locale::$only_639_3,)+
                     milli::tokenizer::Language::Cmn => Locale::Cmn,
                 }
             }
@@ -64,6 +70,7 @@ macro_rules! make_locale {
                 match other {
                     $(Locale::$iso_639_1 => milli::tokenizer::Language::$iso_639_3,)+
                     $(Locale::$iso_639_3 => milli::tokenizer::Language::$iso_639_3,)+
+                    $(Locale::$only_639_3 => milli::tokenizer::Language::$only_639_3,)+
                     Locale::Cmn => milli::tokenizer::Language::Cmn,
                 }
             }
@@ -76,6 +83,7 @@ macro_rules! make_locale {
                 let locale = match s {
                     $($iso_639_1_str => Locale::$iso_639_1,)+
                     $($iso_639_3_str => Locale::$iso_639_3,)+
+                    $($only_639_3_str => Locale::$only_639_3,)+
                     "cmn" => Locale::Cmn,
                     _ => return Err(LocaleFormatError { invalid_locale: s.to_string() }),
                 };
@@ -91,7 +99,7 @@ macro_rules! make_locale {
 
         impl std::fmt::Display for LocaleFormatError {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                let mut valid_locales = [$($iso_639_1_str),+,$($iso_639_3_str),+,"cmn"];
+                let mut valid_locales = [$($iso_639_1_str),+,$($iso_639_3_str),+,$($only_639_3_str),+,"cmn"];
                 valid_locales.sort_by(|left, right| left.len().cmp(&right.len()).then(left.cmp(right)));
                 write!(f, "Unsupported locale `{}`, expected one of {}", self.invalid_locale, valid_locales.join(", "))
             }
@@ -112,6 +120,7 @@ make_locale!(
     (Bg, "bg") => (Bul, "bul"),
     (Ca, "ca") => (Cat, "cat"),
     (Cs, "cs") => (Ces, "ces"),
+    (Cy, "cy") => (Cym, "cym"),
     (Da, "da") => (Dan, "dan"),
     (De, "de") => (Deu, "deu"),
     (El, "el") => (Ell, "ell"),
@@ -132,6 +141,7 @@ make_locale!(
     (Ja, "ja") => (Jpn, "jpn"),
     (Kn, "kn") => (Kan, "kan"),
     (Ka, "ka") => (Kat, "kat"),
+    (Kk, "kk") => (Kaz, "kaz"),
     (Km, "km") => (Khm, "khm"),
     (Ko, "ko") => (Kor, "kor"),
     (La, "la") => (Lat, "lat"),
@@ -171,4 +181,114 @@ make_locale!(
     (Yi, "yi") => (Yid, "yid"),
     (Zh, "zh") => (Zho, "zho"),
     (Zu, "zu") => (Zul, "zul"),
+    (Ab, "ab") => (Abk, "abk"),
+    (Bm, "bm") => (Bam, "bam"),
+    (Br, "br") => (Bre, "bre"),
+    (Cu, "cu") => (Chu, "chu"),
+    (Eu, "eu") => (Eus, "eus"),
+    (Fo, "fo") => (Fao, "fao"),
+    (Gd, "gd") => (Gla, "gla"),
+    (Ga, "ga") => (Gle, "gle"),
+    (Gl, "gl") => (Glg, "glg"),
+    (Gv, "gv") => (Glv, "glv"),
+    (Ht, "ht") => (Hat, "hat"),
+    (Ha, "ha") => (Hau, "hau"),
+    (Is, "is") => (Isl, "isl"),
+    (Ky, "ky") => (Kir, "kir"),
+    (No, "no") => (Nor, "nor"),
+    (Oc, "oc") => (Oci, "oci"),
+    (Sa, "sa") => (San, "san"),
+    (Se, "se") => (Sme, "sme"),
+    (Sd, "sd") => (Snd, "snd"),
+    (Sq, "sq") => (Sqi, "sqi"),
+    (Tt, "tt") => (Tat, "tat"),
+    (Ug, "ug") => (Uig, "uig"),
+    (Wo, "wo") => (Wol, "wol"),
+    (Yo, "yo") => (Yor, "yor"),
+    ;
+    Abq => "abq",
+    Aii => "aii",
+    Ajp => "ajp",
+    Akk => "akk",
+    Aln => "aln",
+    Apu => "apu",
+    Aqz => "aqz",
+    Arb => "arb",
+    Arh => "arh",
+    Arr => "arr",
+    Axm => "axm",
+    Azz => "azz",
+    Bho => "bho",
+    Bor => "bor",
+    Brh => "brh",
+    Bxr => "bxr",
+    Ceb => "ceb",
+    Cop => "cop",
+    Cpg => "cpg",
+    Ctn => "ctn",
+    Egy => "egy",
+    Eme => "eme",
+    Ess => "ess",
+    Frm => "frm",
+    Fro => "fro",
+    Got => "got",
+    Grc => "grc",
+    Gub => "gub",
+    Gun => "gun",
+    Gwi => "gwi",
+    Gya => "gya",
+    Hbo => "hbo",
+    Hit => "hit",
+    Hsb => "hsb",
+    Hyw => "hyw",
+    Kbc => "kbc",
+    Kmr => "kmr",
+    Koi => "koi",
+    Kpv => "kpv",
+    Krl => "krl",
+    Lij => "lij",
+    Lzh => "lzh",
+    Mdf => "mdf",
+    Myu => "myu",
+    Myv => "myv",
+    Naq => "naq",
+    Nds => "nds",
+    Nhi => "nhi",
+    Nmf => "nmf",
+    Oge => "oge",
+    Olo => "olo",
+    Orv => "orv",
+    Ota => "ota",
+    Pay => "pay",
+    Pcm => "pcm",
+    Pro => "pro",
+    Pst => "pst",
+    Qaf => "qaf",
+    Qpm => "qpm",
+    Qtd => "qtd",
+    Qti => "qti",
+    Quc => "quc",
+    Ruc => "ruc",
+    Sab => "sab",
+    Sah => "sah",
+    Say => "say",
+    Scn => "scn",
+    Sga => "sga",
+    Sjo => "sjo",
+    Sms => "sms",
+    Ssp => "ssp",
+    Tpn => "tpn",
+    Urb => "urb",
+    Vep => "vep",
+    Wbp => "wbp",
+    Wuu => "wuu",
+    Xav => "xav",
+    Xcl => "xcl",
+    Xnr => "xnr",
+    Xpg => "xpg",
+    Xum => "xum",
+    Yrk => "yrk",
+    Yrl => "yrl",
+    Yue => "yue",
+    Zza => "zza",
 );
