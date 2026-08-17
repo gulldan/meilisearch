@@ -700,38 +700,71 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
     fn update_synonyms(&mut self) -> Result<()> {
         match self.synonyms {
             Setting::Set(ref user_synonyms) => {
-                let mut builder = TokenizerBuilder::new();
                 let stop_words = self.index.stop_words(self.wtxn)?;
-                if let Some(ref stop_words) = stop_words {
-                    builder.stop_words(stop_words);
-                }
 
                 let separators = self.index.allowed_separators(self.wtxn)?;
                 let separators: Option<Vec<_>> =
                     separators.as_ref().map(|x| x.iter().map(String::as_str).collect());
-                if let Some(ref separators) = separators {
-                    builder.separators(separators);
-                }
 
                 let dictionary = self.index.dictionary(self.wtxn)?;
                 let dictionary: Option<Vec<_>> =
                     dictionary.as_ref().map(|x| x.iter().map(String::as_str).collect());
-                if let Some(ref dictionary) = dictionary {
-                    builder.words_dict(dictionary);
-                }
 
+                let mut builder = synonyms_tokenizer_builder(
+                    stop_words.as_ref(),
+                    separators.as_deref(),
+                    dictionary.as_deref(),
+                );
                 let tokenizer = builder.build();
+
+                let locales: Vec<_> = self
+                    .index
+                    .localized_attributes_rules(self.wtxn)?
+                    .unwrap_or_default()
+                    .iter()
+                    .flat_map(LocalizedAttributesRule::locales)
+                    .copied()
+                    .sorted()
+                    .dedup()
+                    .collect();
+
+                // Each locale gets its own tokenizer: a single allow list would
+                // only ever pick one language per script, and the key has to be
+                // reduced to a lemma under every language of the index.
+                let mut lemmatizing_builders = Vec::with_capacity(locales.len());
+                if let Some(lemmatizer) = crate::lemmatizer::get() {
+                    for locale in &locales {
+                        let mut builder = synonyms_tokenizer_builder(
+                            stop_words.as_ref(),
+                            separators.as_deref(),
+                            dictionary.as_deref(),
+                        );
+                        builder.allow_list(std::slice::from_ref(locale));
+                        builder.lemmatizer(lemmatizer);
+                        lemmatizing_builders.push(builder);
+                    }
+                }
+                let lemmatizing_tokenizers: Vec<_> =
+                    lemmatizing_builders.iter_mut().map(|builder| builder.build()).collect();
 
                 let mut new_synonyms = HashMap::new();
                 for (original_word, synonyms) in user_synonyms {
-                    // Normalize only the key
-                    let normalized_word = normalize(&tokenizer, original_word);
+                    // Normalize only the key. A query word reaches the database
+                    // as a lemma, so a key written in an inflected form is also
+                    // stored under its lemma in every locale of the index.
+                    let mut keys = vec![normalize(&tokenizer, original_word)];
+                    for tokenizer in &lemmatizing_tokenizers {
+                        let key = normalize(tokenizer, original_word);
+                        if !keys.contains(&key) {
+                            keys.push(key);
+                        }
+                    }
 
                     // Store the normalized synonyms under the normalized word,
                     // merging the possible duplicate words.
-                    if !normalized_word.is_empty() {
+                    for key in keys.into_iter().filter(|key| !key.is_empty()) {
                         new_synonyms
-                            .entry(normalized_word)
+                            .entry(key)
                             .or_insert_with(Vec::new)
                             .extend(synonyms.iter().cloned());
                     }
@@ -1331,17 +1364,24 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
     }
 
     fn update_localized_attributes_rules(&mut self) -> Result<()> {
-        match &self.localized_attributes_rules {
+        let changes = match &self.localized_attributes_rules {
             Setting::Set(new) => {
                 let old = self.index.localized_attributes_rules(self.wtxn)?;
                 if old.as_ref() != Some(new) {
                     self.index.put_localized_attributes_rules(self.wtxn, new.clone())?;
+                    true
+                } else {
+                    false
                 }
             }
-            Setting::Reset => {
-                self.index.delete_localized_attributes_rules(self.wtxn)?;
-            }
-            Setting::NotSet => (),
+            Setting::Reset => self.index.delete_localized_attributes_rules(self.wtxn)?,
+            Setting::NotSet => false,
+        };
+
+        // the synonyms must be updated as the locales decide which lemma
+        // a synonym key is stored under.
+        if changes && self.synonyms == Setting::NotSet {
+            self.synonyms = Setting::Set(self.index.user_defined_synonyms(self.wtxn)?);
         }
 
         Ok(())
@@ -1493,13 +1533,15 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
         self.update_non_separator_tokens()?;
         self.update_separator_tokens()?;
         self.update_dictionary()?;
+        self.update_localized_attributes_rules()?;
+        // Make sure to update the synonyms *after* updating the dictionary and
+        // the localized attributes rules, as both decide how a key is parsed.
         self.update_synonyms()?;
         self.update_user_defined_searchable_attributes()?;
         self.update_exact_attributes()?;
         self.update_proximity_precision()?;
         self.update_prefix_search()?;
         self.update_facet_search()?;
-        self.update_localized_attributes_rules()?;
         self.update_disabled_typos_terms()?;
         self.update_chat_config()?;
 
@@ -1593,8 +1635,9 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
         self.update_separator_tokens()?;
         self.update_dictionary()?;
         self.update_localized_attributes_rules()?;
-        // Make sure to update the synonyms *after* updating the dictionary
-        // as the dictionary is used by the synonyms to correctly parse them.
+        // Make sure to update the synonyms *after* updating the dictionary and
+        // the localized attributes rules, as both are used by the synonyms to
+        // correctly parse them.
         self.update_synonyms()?;
 
         // Note that we don't need to update the searchables here,
@@ -1644,6 +1687,27 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
             Ok(None)
         }
     }
+}
+
+/// Tokenizer of a synonym key, without any lemmatizer: the lemmas of a key are
+/// gathered by dedicated tokenizers, one per locale of the index.
+fn synonyms_tokenizer_builder<'a>(
+    stop_words: Option<&'a fst::Set<&'a [u8]>>,
+    separators: Option<&'a [&'a str]>,
+    dictionary: Option<&'a [&'a str]>,
+) -> TokenizerBuilder<'a, &'a [u8]> {
+    let mut builder = TokenizerBuilder::new();
+    if let Some(stop_words) = stop_words {
+        builder.stop_words(stop_words);
+    }
+    if let Some(separators) = separators {
+        builder.separators(separators);
+    }
+    if let Some(dictionary) = dictionary {
+        builder.words_dict(dictionary);
+    }
+
+    builder
 }
 
 /// Normalize and tokenize a text
