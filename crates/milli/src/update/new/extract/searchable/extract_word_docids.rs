@@ -69,39 +69,45 @@ impl<'extractor> WordDocidsBalancedCaches<'extractor> {
         position: u16,
         word: &str,
         exact: bool,
+        lemma: Option<(&str, bool)>,
         field_db_extraction: FieldDbExtraction,
         docid: u32,
         bump: &Bump,
     ) -> Result<()> {
-        let word_bytes = word.as_bytes();
-        if exact {
-            self.exact_word_docids.insert_add_u32(word_bytes, docid)?;
-        } else {
-            self.word_docids.insert_add_u32(word_bytes, docid)?;
-        }
+        let longest = word.len().max(lemma.map_or(0, |(lemma, _)| lemma.len()));
+        let mut buffer = BumpVec::with_capacity_in(longest + 1 + size_of::<FieldId>(), bump);
+        let position = bucketed_position(position);
 
-        let buffer_size = word_bytes.len() + 1 + size_of::<FieldId>();
-        let mut buffer = BumpVec::with_capacity_in(buffer_size, bump);
+        // Лемма ложится теми же ключами и на ту же позицию, что и набранное
+        // слово: для баз это просто ещё одно слово документа.
+        for (word, exact) in std::iter::once((word, exact)).chain(lemma) {
+            let word_bytes = word.as_bytes();
+            if exact {
+                self.exact_word_docids.insert_add_u32(word_bytes, docid)?;
+            } else {
+                self.word_docids.insert_add_u32(word_bytes, docid)?;
+            }
 
-        if field_db_extraction == FieldDbExtraction::Extract {
+            if field_db_extraction == FieldDbExtraction::Extract {
+                buffer.clear();
+                buffer.extend_from_slice(word_bytes);
+                buffer.push(0);
+                buffer.extend_from_slice(&field_id.to_be_bytes());
+                self.word_fid_docids.insert_add_u32(&buffer, docid)?;
+            }
+
             buffer.clear();
             buffer.extend_from_slice(word_bytes);
             buffer.push(0);
-            buffer.extend_from_slice(&field_id.to_be_bytes());
-            self.word_fid_docids.insert_add_u32(&buffer, docid)?;
+            buffer.extend_from_slice(&position.to_be_bytes());
+            self.word_position_docids.insert_add_u32(&buffer, docid)?;
         }
-
-        let position = bucketed_position(position);
-        buffer.clear();
-        buffer.extend_from_slice(word_bytes);
-        buffer.push(0);
-        buffer.extend_from_slice(&position.to_be_bytes());
-        self.word_position_docids.insert_add_u32(&buffer, docid)?;
 
         if self.current_docid.is_some_and(|id| docid != id) {
             self.flush_fid_word_count(&mut buffer)?;
         }
 
+        // Слово документа одно, форм у него две — длину поля меряем словами.
         if field_db_extraction == FieldDbExtraction::Extract {
             self.fid_word_count
                 .entry(field_id)
@@ -121,39 +127,45 @@ impl<'extractor> WordDocidsBalancedCaches<'extractor> {
         position: u16,
         word: &str,
         exact: bool,
+        lemma: Option<(&str, bool)>,
         field_db_extraction: FieldDbExtraction,
         docid: u32,
         bump: &Bump,
     ) -> Result<()> {
-        let word_bytes = word.as_bytes();
-        if exact {
-            self.exact_word_docids.insert_del_u32(word_bytes, docid)?;
-        } else {
-            self.word_docids.insert_del_u32(word_bytes, docid)?;
-        }
+        let longest = word.len().max(lemma.map_or(0, |(lemma, _)| lemma.len()));
+        let mut buffer = BumpVec::with_capacity_in(longest + 1 + size_of::<FieldId>(), bump);
+        let position = bucketed_position(position);
 
-        let buffer_size = word_bytes.len() + 1 + size_of::<FieldId>();
-        let mut buffer = BumpVec::with_capacity_in(buffer_size, bump);
+        // Лемма ложится теми же ключами и на ту же позицию, что и набранное
+        // слово: для баз это просто ещё одно слово документа.
+        for (word, exact) in std::iter::once((word, exact)).chain(lemma) {
+            let word_bytes = word.as_bytes();
+            if exact {
+                self.exact_word_docids.insert_del_u32(word_bytes, docid)?;
+            } else {
+                self.word_docids.insert_del_u32(word_bytes, docid)?;
+            }
 
-        if field_db_extraction == FieldDbExtraction::Extract {
+            if field_db_extraction == FieldDbExtraction::Extract {
+                buffer.clear();
+                buffer.extend_from_slice(word_bytes);
+                buffer.push(0);
+                buffer.extend_from_slice(&field_id.to_be_bytes());
+                self.word_fid_docids.insert_del_u32(&buffer, docid)?;
+            }
+
             buffer.clear();
             buffer.extend_from_slice(word_bytes);
             buffer.push(0);
-            buffer.extend_from_slice(&field_id.to_be_bytes());
-            self.word_fid_docids.insert_del_u32(&buffer, docid)?;
+            buffer.extend_from_slice(&position.to_be_bytes());
+            self.word_position_docids.insert_del_u32(&buffer, docid)?;
         }
-
-        let position = bucketed_position(position);
-        buffer.clear();
-        buffer.extend_from_slice(word_bytes);
-        buffer.push(0);
-        buffer.extend_from_slice(&position.to_be_bytes());
-        self.word_position_docids.insert_del_u32(&buffer, docid)?;
 
         if self.current_docid.is_some_and(|id| docid != id) {
             self.flush_fid_word_count(&mut buffer)?;
         }
 
+        // Слово документа одно, форм у него две — длину поля меряем словами.
         if field_db_extraction == FieldDbExtraction::Extract {
             self.fid_word_count
                 .entry(field_id)
@@ -370,12 +382,13 @@ impl WordDocidsExtractors {
 
         match document_change {
             DocumentChange::Deletion(inner) => {
-                let mut token_fn = |fname: &str, fid, pos, word: &str| {
+                let mut token_fn = |fname: &str, fid, pos, word: &str, lemma: Option<&str>| {
                     cached_sorter.insert_del_u32(
                         fid,
                         pos,
                         word,
                         is_exact(fname, word),
+                        lemma.map(|lemma| (lemma, is_exact(fname, lemma))),
                         FieldDbExtraction::Extract,
                         inner.docid(),
                         doc_alloc,
@@ -399,12 +412,13 @@ impl WordDocidsExtractors {
                     return Ok(());
                 }
 
-                let mut token_fn = |fname: &str, fid, pos, word: &str| {
+                let mut token_fn = |fname: &str, fid, pos, word: &str, lemma: Option<&str>| {
                     cached_sorter.insert_del_u32(
                         fid,
                         pos,
                         word,
                         is_exact(fname, word),
+                        lemma.map(|lemma| (lemma, is_exact(fname, lemma))),
                         FieldDbExtraction::Extract,
                         inner.docid(),
                         doc_alloc,
@@ -416,12 +430,13 @@ impl WordDocidsExtractors {
                     &mut token_fn,
                 )?;
 
-                let mut token_fn = |fname: &str, fid, pos, word: &str| {
+                let mut token_fn = |fname: &str, fid, pos, word: &str, lemma: Option<&str>| {
                     cached_sorter.insert_add_u32(
                         fid,
                         pos,
                         word,
                         is_exact(fname, word),
+                        lemma.map(|lemma| (lemma, is_exact(fname, lemma))),
                         FieldDbExtraction::Extract,
                         inner.docid(),
                         doc_alloc,
@@ -434,12 +449,13 @@ impl WordDocidsExtractors {
                 )?;
             }
             DocumentChange::Insertion(inner) => {
-                let mut token_fn = |fname: &str, fid, pos, word: &str| {
+                let mut token_fn = |fname: &str, fid, pos, word: &str, lemma: Option<&str>| {
                     cached_sorter.insert_add_u32(
                         fid,
                         pos,
                         word,
                         is_exact(fname, word),
+                        lemma.map(|lemma| (lemma, is_exact(fname, lemma))),
                         FieldDbExtraction::Extract,
                         inner.docid(),
                         doc_alloc,
@@ -658,7 +674,7 @@ impl WordDocidsExtractors {
 
                         Ok((fid, PatternMatch::Parent))
                     },
-                    &mut |_, _, _, _| Ok(()),
+                    &mut |_, _, _, _, _| Ok(()),
                 )?;
             }
             OneOrTwoTokenizers::TwoTokenizer { old: _, new: _ } => {
@@ -718,7 +734,11 @@ impl WordDocidsExtractors {
         // the language settings, dictionary, separators, non-separators...
         match document_tokenizers {
             OneOrTwoTokenizers::OneTokenizer(document_tokenizer) => {
-                let mut token_fn = |_field_name: &str, field_id, pos, word: &str| {
+                let mut token_fn = |_field_name: &str,
+                                    field_id,
+                                    pos,
+                                    word: &str,
+                                    lemma: Option<&str>| {
                     use PatternMatch::{Match, NoMatch, Parent};
 
                     let old_field_metadata = old_fields_ids_map.metadata(field_id).unwrap();
@@ -737,6 +757,12 @@ impl WordDocidsExtractors {
                             pos,
                             word,
                             old_exact == Match || old_disabled_typos_terms.is_exact(word),
+                            lemma.map(|lemma| {
+                                (
+                                    lemma,
+                                    old_exact == Match || old_disabled_typos_terms.is_exact(lemma),
+                                )
+                            }),
                             FieldDbExtraction::Extract,
                             document.docid(),
                             doc_alloc,
@@ -753,6 +779,12 @@ impl WordDocidsExtractors {
                             pos,
                             word,
                             new_exact == Match || new_disabled_typos_terms.is_exact(word),
+                            lemma.map(|lemma| {
+                                (
+                                    lemma,
+                                    new_exact == Match || new_disabled_typos_terms.is_exact(lemma),
+                                )
+                            }),
                             FieldDbExtraction::Extract,
                             document.docid(),
                             doc_alloc,
@@ -769,6 +801,13 @@ impl WordDocidsExtractors {
                                 pos,
                                 word,
                                 old_exact == Match || old_disabled_typos_terms.is_exact(word),
+                                lemma.map(|lemma| {
+                                    (
+                                        lemma,
+                                        old_exact == Match
+                                            || old_disabled_typos_terms.is_exact(lemma),
+                                    )
+                                }),
                                 // Should we really have this specific case?
                                 FieldDbExtraction::Skip,
                                 document.docid(),
@@ -779,6 +818,13 @@ impl WordDocidsExtractors {
                                 pos,
                                 word,
                                 new_exact == Match || new_disabled_typos_terms.is_exact(word),
+                                lemma.map(|lemma| {
+                                    (
+                                        lemma,
+                                        new_exact == Match
+                                            || new_disabled_typos_terms.is_exact(lemma),
+                                    )
+                                }),
                                 // Should we really have this specific case?
                                 FieldDbExtraction::Skip,
                                 document.docid(),
@@ -798,23 +844,32 @@ impl WordDocidsExtractors {
                 old: old_document_tokenizer,
                 new: new_document_tokenizer,
             } => {
-                let mut old_token_fn = |_field_name: &str, field_id, pos, word: &str| {
-                    use PatternMatch::Match;
+                let mut old_token_fn =
+                    |_field_name: &str, field_id, pos, word: &str, lemma: Option<&str>| {
+                        use PatternMatch::Match;
 
-                    match old_fields_ids_map.metadata(field_id).unwrap() {
-                        Metadata { searchable: (Match, _), exact: old_exact, .. } => cached_sorter
-                            .insert_del_u32(
-                                field_id,
-                                pos,
-                                word,
-                                old_exact == Match || old_disabled_typos_terms.is_exact(word),
-                                FieldDbExtraction::Extract,
-                                document.docid(),
-                                doc_alloc,
-                            ),
-                        _ => Ok(()),
-                    }
-                };
+                        match old_fields_ids_map.metadata(field_id).unwrap() {
+                            Metadata { searchable: (Match, _), exact: old_exact, .. } => {
+                                cached_sorter.insert_del_u32(
+                                    field_id,
+                                    pos,
+                                    word,
+                                    old_exact == Match || old_disabled_typos_terms.is_exact(word),
+                                    lemma.map(|lemma| {
+                                        (
+                                            lemma,
+                                            old_exact == Match
+                                                || old_disabled_typos_terms.is_exact(lemma),
+                                        )
+                                    }),
+                                    FieldDbExtraction::Extract,
+                                    document.docid(),
+                                    doc_alloc,
+                                )
+                            }
+                            _ => Ok(()),
+                        }
+                    };
 
                 old_document_tokenizer.tokenize_document(
                     current_document,
@@ -822,23 +877,32 @@ impl WordDocidsExtractors {
                     &mut old_token_fn,
                 )?;
 
-                let mut new_token_fn = |_field_name: &str, field_id, pos, word: &str| {
-                    use PatternMatch::Match;
+                let mut new_token_fn =
+                    |_field_name: &str, field_id, pos, word: &str, lemma: Option<&str>| {
+                        use PatternMatch::Match;
 
-                    match new_fields_ids_map.metadata(field_id).unwrap() {
-                        Metadata { searchable: (Match, _), exact: new_exact, .. } => cached_sorter
-                            .insert_add_u32(
-                                field_id,
-                                pos,
-                                word,
-                                new_exact == Match || new_disabled_typos_terms.is_exact(word),
-                                FieldDbExtraction::Extract,
-                                document.docid(),
-                                doc_alloc,
-                            ),
-                        _ => Ok(()),
-                    }
-                };
+                        match new_fields_ids_map.metadata(field_id).unwrap() {
+                            Metadata { searchable: (Match, _), exact: new_exact, .. } => {
+                                cached_sorter.insert_add_u32(
+                                    field_id,
+                                    pos,
+                                    word,
+                                    new_exact == Match || new_disabled_typos_terms.is_exact(word),
+                                    lemma.map(|lemma| {
+                                        (
+                                            lemma,
+                                            new_exact == Match
+                                                || new_disabled_typos_terms.is_exact(lemma),
+                                        )
+                                    }),
+                                    FieldDbExtraction::Extract,
+                                    document.docid(),
+                                    doc_alloc,
+                                )
+                            }
+                            _ => Ok(()),
+                        }
+                    };
 
                 new_document_tokenizer.tokenize_document(
                     current_document,

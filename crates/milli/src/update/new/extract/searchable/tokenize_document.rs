@@ -8,7 +8,7 @@ use crate::update::new::document::Document;
 use crate::update::new::extract::perm_json_p::{
     seek_leaf_values_in_array, seek_leaf_values_in_object, Depth,
 };
-use crate::{FieldId, InternalError, LocalizedAttributesRule, Result, MAX_WORD_LENGTH};
+use crate::{FieldId, InternalError, LocalizedAttributesRule, Result};
 
 // todo: should be crate::proximity::MAX_DISTANCE but it has been forgotten
 const MAX_DISTANCE: u32 = 8;
@@ -25,7 +25,7 @@ impl DocumentTokenizer<'_> {
         &self,
         document: impl Document<'doc>,
         should_tokenize: &mut impl FnMut(&str) -> Result<(FieldId, PatternMatch)>,
-        token_fn: &mut impl FnMut(&str, FieldId, u16, &str) -> Result<()>,
+        token_fn: &mut impl FnMut(&str, FieldId, u16, &str, Option<&str>) -> Result<()>,
     ) -> Result<()> {
         let mut field_position = HashMap::new();
         for entry in document.iter_top_level_fields() {
@@ -71,7 +71,13 @@ impl DocumentTokenizer<'_> {
         field_id: FieldId,
         field_name: &str,
         value: &Value,
-        token_fn: &mut impl FnMut(&str, u16, u16, &str) -> std::result::Result<(), crate::Error>,
+        token_fn: &mut impl FnMut(
+            &str,
+            u16,
+            u16,
+            &str,
+            Option<&str>,
+        ) -> std::result::Result<(), crate::Error>,
         field_position: &mut HashMap<u16, u32>,
     ) -> Result<()> {
         let position = field_position
@@ -109,12 +115,10 @@ impl DocumentTokenizer<'_> {
 
         for (index, token) in tokens {
             // keep a word only if it is not empty and fit in a LMDB key.
-            let token = token.lemma().trim();
-            if !token.is_empty() && token.len() <= MAX_WORD_LENGTH {
-                *position = index;
-                if let Ok(position) = (*position).try_into() {
-                    token_fn(field_name, field_id, position, token)?;
-                }
+            let Some((word, lemma)) = crate::lemmatizer::indexed_forms(&token) else { continue };
+            *position = index;
+            if let Ok(position) = (*position).try_into() {
+                token_fn(field_name, field_id, position, word, lemma)?;
             }
         }
 
@@ -182,9 +186,12 @@ pub fn tokenizer_builder<'a>(
 
 #[cfg(test)]
 mod test {
+    use std::borrow::Cow;
+
     use bumpalo::Bump;
     use bumparaw_collections::RawMap;
-    use charabia::TokenizerBuilder;
+    use charabia::normalizer::Lemmatizer;
+    use charabia::{Language, TokenizerBuilder};
     use meili_snap::snapshot;
     use rustc_hash::FxBuildHasher;
     use serde_json::json;
@@ -194,6 +201,110 @@ mod test {
     use crate::fields_ids_map::metadata::{FieldIdMapWithMetadata, MetadataBuilder};
     use crate::update::new::document::{DocumentFromVersions, Versions};
     use crate::{FieldsIdsMap, GlobalFieldsIdsMap, UserError};
+
+    /// Словарь на одно слово: языка не спрашивает, потому что здесь важно не
+    /// то, как он выбирает лемму, а то, что уходит из токенизатора в индекс.
+    ///
+    /// Регистр он приводит сам — конвейер отдаёт слово до понижения регистра,
+    /// чтобы словарь мог отличить имя собственное от слова в начале фразы.
+    #[derive(Debug)]
+    struct OneWord;
+
+    impl Lemmatizer for OneWord {
+        fn lemma<'o>(
+            &self,
+            word: &'o str,
+            _language: Option<Language>,
+            _sentence_initial: bool,
+        ) -> Option<Cow<'o, str>> {
+            (word.to_lowercase() == "doggos").then_some(Cow::Borrowed("doggo"))
+        }
+    }
+
+    /// Слова поля так, как их получает индексатор: позиция, набранная форма и
+    /// лемма, когда словарь слово изменил.
+    fn tokenized(text: &str, lemmatizer: Option<&dyn Lemmatizer>) -> Vec<(u16, String, String)> {
+        let mut fields_ids_map = FieldsIdsMap::new();
+        fields_ids_map.insert("text").unwrap();
+
+        let mut builder = TokenizerBuilder::default();
+        if let Some(lemmatizer) = lemmatizer {
+            builder.lemmatizer(lemmatizer);
+        }
+        let document_tokenizer = DocumentTokenizer {
+            tokenizer: &builder.build(),
+            localized_attributes_rules: &[],
+            max_positions_per_attributes: 1000,
+        };
+
+        let fields_ids_map = FieldIdMapWithMetadata::new(
+            fields_ids_map,
+            MetadataBuilder::new(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                None,
+                None,
+                Default::default(),
+            ),
+        );
+        let fields_ids_map_lock = std::sync::RwLock::new(fields_ids_map);
+        let mut global_fields_ids_map = GlobalFieldsIdsMap::new(&fields_ids_map_lock);
+
+        let document = json!({ "text": text }).to_string();
+        let bump = Bump::new();
+        let document: &RawValue = serde_json::from_str(&document).unwrap();
+        let document = RawMap::from_raw_value_and_hasher(document, FxBuildHasher, &bump).unwrap();
+        let document = Versions::single(document);
+        let document = DocumentFromVersions::new(&document);
+
+        let mut should_tokenize = |field_name: &str| {
+            let Some(field_id) = global_fields_ids_map.id_or_insert(field_name) else {
+                return Err(UserError::AttributeLimitReached.into());
+            };
+            Ok((field_id, PatternMatch::Match))
+        };
+
+        let mut words = Vec::new();
+        document_tokenizer
+            .tokenize_document(
+                document,
+                &mut should_tokenize,
+                &mut |_fname, _fid, position, word, lemma| {
+                    words.push((position, word.to_owned(), lemma.unwrap_or("—").to_owned()));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        words
+    }
+
+    #[test]
+    fn a_lemmatised_word_reaches_the_index_in_both_forms() {
+        // Обе формы приходят одним вызовом и с одной позицией: расстояние между
+        // ними ноль, и парой друг другу они не станут.
+        assert_eq!(
+            tokenized("Doggos meet doggos", Some(&OneWord)),
+            vec![
+                (0, "doggos".to_owned(), "doggo".to_owned()),
+                (1, "meet".to_owned(), "—".to_owned()),
+                (2, "doggos".to_owned(), "doggo".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn without_a_dictionary_a_word_reaches_the_index_alone() {
+        assert_eq!(
+            tokenized("Doggos meet doggos", None),
+            vec![
+                (0, "doggos".to_owned(), "—".to_owned()),
+                (1, "meet".to_owned(), "—".to_owned()),
+                (2, "doggos".to_owned(), "—".to_owned()),
+            ]
+        );
+    }
 
     #[test]
     fn test_tokenize_document() {
@@ -262,10 +373,14 @@ mod test {
         };
 
         document_tokenizer
-            .tokenize_document(document, &mut should_tokenize, &mut |_fname, fid, pos, word| {
-                words.insert([fid, pos], word.to_string());
-                Ok(())
-            })
+            .tokenize_document(
+                document,
+                &mut should_tokenize,
+                &mut |_fname, fid, pos, word, _lemma| {
+                    words.insert([fid, pos], word.to_string());
+                    Ok(())
+                },
+            )
             .unwrap();
 
         snapshot!(format!("{:#?}", words), @r###"

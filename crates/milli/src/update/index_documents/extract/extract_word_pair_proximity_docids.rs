@@ -5,6 +5,7 @@ use std::{cmp, io};
 
 use obkv::KvReaderU16;
 
+use super::extract_docid_word_positions::word_forms;
 use super::helpers::{
     create_sorter, create_writer, try_split_array_at, writer_into_reader, GrenadParameters,
     MergeDeladdCboRoaringBitmaps,
@@ -94,7 +95,7 @@ pub fn extract_word_pair_proximity_docids<R: io::Read + io::Seek>(
 
                 // deletions
                 if let Some(deletion) = KvReaderDelAdd::from_slice(value).get(DelAdd::Deletion) {
-                    for (position, word) in KvReaderU16::from_slice(deletion).iter() {
+                    for (position, forms) in KvReaderU16::from_slice(deletion).iter() {
                         // drain the proximity window until the head word is considered close to the word we are inserting.
                         while del_word_positions.front().is_some_and(|(_w, p)| {
                             index_proximity(*p as u32, position as u32) >= MAX_DISTANCE
@@ -106,8 +107,14 @@ pub fn extract_word_pair_proximity_docids<R: io::Read + io::Seek>(
                         }
 
                         // insert the new word.
-                        let word = std::str::from_utf8(word)?;
-                        del_word_positions.push_back((word.to_string(), position));
+                        //
+                        // Обе формы слова встают на одну позицию: расстояние
+                        // между ними ноль, парой друг другу они не становятся,
+                        // а соседей получают одних и тех же.
+                        for word in word_forms(forms) {
+                            let word = std::str::from_utf8(word)?;
+                            del_word_positions.push_back((word.to_string(), position));
+                        }
                     }
 
                     while !del_word_positions.is_empty() {
@@ -127,7 +134,7 @@ pub fn extract_word_pair_proximity_docids<R: io::Read + io::Seek>(
 
                 // additions
                 if let Some(addition) = KvReaderDelAdd::from_slice(value).get(DelAdd::Addition) {
-                    for (position, word) in KvReaderU16::from_slice(addition).iter() {
+                    for (position, forms) in KvReaderU16::from_slice(addition).iter() {
                         // drain the proximity window until the head word is considered close to the word we are inserting.
                         while add_word_positions.front().is_some_and(|(_w, p)| {
                             index_proximity(*p as u32, position as u32) >= MAX_DISTANCE
@@ -139,8 +146,14 @@ pub fn extract_word_pair_proximity_docids<R: io::Read + io::Seek>(
                         }
 
                         // insert the new word.
-                        let word = std::str::from_utf8(word)?;
-                        add_word_positions.push_back((word.to_string(), position));
+                        //
+                        // Обе формы слова встают на одну позицию: расстояние
+                        // между ними ноль, парой друг другу они не становятся,
+                        // а соседей получают одних и тех же.
+                        for word in word_forms(forms) {
+                            let word = std::str::from_utf8(word)?;
+                            add_word_positions.push_back((word.to_string(), position));
+                        }
                     }
 
                     while !add_word_positions.is_empty() {

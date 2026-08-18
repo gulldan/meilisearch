@@ -12,7 +12,7 @@ use super::helpers::{create_sorter, sorter_into_reader, GrenadParameters, KeepLa
 use crate::error::{InternalError, SerializationError};
 use crate::update::del_add::{del_add_from_two_obkvs, DelAdd, KvReaderDelAdd};
 use crate::update::settings::{InnerIndexSettings, InnerIndexSettingsDiff};
-use crate::{FieldId, PatternMatch, Result, MAX_POSITION_PER_ATTRIBUTE, MAX_WORD_LENGTH};
+use crate::{FieldId, PatternMatch, Result, MAX_POSITION_PER_ATTRIBUTE};
 
 /// Extracts the word and positions where this word appear and
 /// prefixes it by the document id.
@@ -202,6 +202,19 @@ fn tokenizer_builder<'a>(
     tokenizer_builder
 }
 
+/// Разделитель форм одного слова внутри значения позиции.
+///
+/// obkv не пускает два ключа с одной позицией, а позиция у набранной формы и у
+/// её леммы одна и та же, так что обе лежат в одном значении. Ноль внутри слова
+/// взяться неоткуда: управляющие символы снимает нормализация.
+const FORM_SEPARATOR: u8 = 0;
+
+/// Формы слова, записанные в одну позицию: набранная и, если словарь её
+/// изменил, лемма.
+pub(super) fn word_forms(value: &[u8]) -> impl Iterator<Item = &[u8]> {
+    value.split(|byte| *byte == FORM_SEPARATOR)
+}
+
 /// Extract words mapped with their positions of a document.
 fn tokens_from_document<'a>(
     obkv: &'a KvReader<FieldId>,
@@ -242,13 +255,19 @@ fn tokens_from_document<'a>(
 
                     for (index, token) in tokens {
                         // keep a word only if it is not empty and fit in a LMDB key.
-                        let token = token.lemma().trim();
-                        if !token.is_empty() && token.len() <= MAX_WORD_LENGTH {
-                            let position: u16 = index
-                                .try_into()
-                                .map_err(|_| SerializationError::InvalidNumberSerialization)?;
-                            writer.insert(position, token.as_bytes())?;
+                        let Some((word, lemma)) = crate::lemmatizer::indexed_forms(&token) else {
+                            continue;
+                        };
+                        let position: u16 = index
+                            .try_into()
+                            .map_err(|_| SerializationError::InvalidNumberSerialization)?;
+                        buffers.forms_buffer.clear();
+                        buffers.forms_buffer.extend_from_slice(word.as_bytes());
+                        if let Some(lemma) = lemma {
+                            buffers.forms_buffer.push(FORM_SEPARATOR);
+                            buffers.forms_buffer.extend_from_slice(lemma.as_bytes());
                         }
+                        writer.insert(position, &buffers.forms_buffer)?;
                     }
 
                     // write positions into document.
@@ -336,4 +355,6 @@ struct Buffers {
     obkv_buffer: Vec<u8>,
     // buffer used to store the value data containing an obkv of tokens with their positions.
     obkv_positions_buffer: Vec<u8>,
+    // буфер под формы одного слова, склеенные через FORM_SEPARATOR.
+    forms_buffer: Vec<u8>,
 }
