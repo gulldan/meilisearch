@@ -43,6 +43,14 @@ pub struct QueryTermSubset {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct QueryTerm {
     original: Interned<String>,
+    /// Лемма набранного слова и сколько опечаток ей полагается — когда словарь
+    /// слово изменил.
+    ///
+    /// Индекс полон лемм, а словари запроса и документа расходятся обычно на
+    /// букву-другую, поэтому окрестность леммы по опечаткам ищется наравне с
+    /// окрестностью того, что набрал пользователь. Префикса у леммы нет: её
+    /// никто не дописывает.
+    lemma: Option<(Interned<String>, u8)>,
     ngram_words: Option<Vec<Interned<String>>>,
     max_levenshtein_distance: u8,
     is_prefix: bool,

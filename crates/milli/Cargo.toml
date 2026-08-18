@@ -97,6 +97,7 @@ hannoy = { version = "0.1.3", features = ["arroy"] }
 rand = "0.8.5"
 tracing = "0.1.41"
 url = "2.5.7"
+unicode-normalization = "0.1.25"
 hashbrown = "0.15.5"
 routes = { path = "../routes" }
 bumpalo = "3.19.0"

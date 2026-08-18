@@ -1,7 +1,9 @@
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use charabia::normalizer::{NormalizedTokenIter, NormalizerOption};
 use charabia::{Normalize as _, SeparatorKind, Token, TokenKind, Tokenizer};
+use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization as _};
 
 use super::compute_derivations::{
     partially_initialized_term_from_lemma, partially_initialized_term_from_word,
@@ -27,12 +29,40 @@ pub struct ExtractedTokens {
 
 /// Normalization of a query word without the lemmatizer, to recover the form
 /// the user actually typed.
-const PREFIX_NORMALIZER_OPTION: NormalizerOption = NormalizerOption {
+const SURFACE_NORMALIZER_OPTION: NormalizerOption = NormalizerOption {
     create_char_map: false,
     lossy: true,
     classifier: charabia::normalizer::ClassifierOption { stop_words: None, separators: None },
     lemmatizer: None,
 };
+
+/// Слово так, как его набрал пользователь: тот же конвейер нормализации, что и
+/// у токенизатора, вплоть до письменности и языка, но без лемматизатора.
+///
+/// Charabia раскладывает букву на основу и знак (NFKD), а словарь отдаёт лемму
+/// собранной — собранной она и ложится в индекс. Поэтому поверхностную форму
+/// тоже собираем: иначе `мойки` осталось бы `мои` со знаком краткости, чего в
+/// индексе нет, и ни префикс, ни опечатки от такого слова не сработали бы.
+fn surface_form<'a>(original: &'a str, token: &Token<'_>) -> Option<Cow<'a, str>> {
+    let surface = original.get(token.byte_start..token.byte_end)?;
+    let surface = Token {
+        lemma: Cow::Borrowed(surface),
+        script: token.script,
+        language: token.language,
+        ..Default::default()
+    }
+    .normalize(&SURFACE_NORMALIZER_OPTION)
+    .lemma;
+    Some(composed(surface))
+}
+
+/// Слово в собранной форме (NFC), без копии, когда оно уже собрано.
+fn composed(text: Cow<'_, str>) -> Cow<'_, str> {
+    match is_nfc_quick(text.chars()) {
+        IsNormalized::Yes => text,
+        _ => Cow::Owned(text.nfc().collect()),
+    }
+}
 
 /// Convert the tokenised search query into a list of located query terms.
 #[tracing::instrument(level = "trace", skip_all, target = "search::query")]
@@ -88,71 +118,54 @@ pub fn located_query_terms_from_tokens(
                     let word = Word::Original(ctx.word_interner.insert(word));
                     negative_words.push(word);
                     negative_next_token = false;
-                } else if peekable.peek().is_some() {
-                    match token.kind {
-                        TokenKind::Word => {
-                            let word = token.lemma();
-                            let term = partially_initialized_term_from_word(
+                } else {
+                    // Внутри запроса стоп-слова словом не ищутся, а последнее
+                    // слово ищется всегда — его ещё могут дописывать.
+                    let is_last = peekable.peek().is_none();
+                    if is_last || matches!(token.kind, TokenKind::Word) {
+                        let word = token.lemma();
+                        // Последнее слово ищется префиксом: пользователь может
+                        // его ещё набирать.
+                        let is_prefix = is_last && allow_prefix_search;
+                        // Поверхностную форму несёт каждое слово, а не только
+                        // последнее. Язык запроса определяется по всей строке,
+                        // поэтому лемма слова может разойтись с той, что легла в
+                        // индекс, — и тогда документ находит только набранное.
+                        // Ещё она держит префикс: лемматизация срезала бы его,
+                        // а `мыши` обязано находить и `мышь`, и `мышиный`.
+                        // Сравнение — в собранной форме: разложенная буква это
+                        // не то изменение, ради которого стоит хранить обе.
+                        let composed_word = composed(Cow::Borrowed(word));
+                        let surface = surface_form(original, &token)
+                            .filter(|surface| surface != &composed_word);
+                        let term = match surface {
+                            // Опечаток каждому слову отмерено по его же длине:
+                            // поверхностной форме — по набранному, лемме — по
+                            // лемме, как было бы, ищи мы одну её.
+                            Some(surface) => partially_initialized_term_from_lemma(
+                                ctx,
+                                tokenizer,
+                                word,
+                                surface.as_ref(),
+                                nbr_typos(surface.as_ref()),
+                                nbr_typos(word),
+                                is_prefix,
+                            )?,
+                            None => partially_initialized_term_from_word(
                                 ctx,
                                 tokenizer,
                                 word,
                                 nbr_typos(word),
+                                is_prefix,
                                 false,
-                                false,
-                            )?;
-                            let located_term = LocatedQueryTerm {
-                                value: ctx.term_interner.push(term),
-                                positions: position..=position,
-                            };
-                            query_terms.push(located_term);
-                        }
-                        TokenKind::StopWord | TokenKind::Separator(_) | TokenKind::Unknown => (),
+                            )?,
+                        };
+                        let located_term = LocatedQueryTerm {
+                            value: ctx.term_interner.push(term),
+                            positions: position..=position,
+                        };
+                        query_terms.push(located_term);
                     }
-                } else {
-                    let word = token.lemma();
-                    // The last word is searched as a prefix because the user may
-                    // still be typing it. Lemmatization would take that prefix
-                    // away, so the surface form is kept alongside the lemma:
-                    // `мыши` has to find `мышь` and still grow into `мышиный`.
-                    // The surface form goes through the very same pipeline
-                    // minus the lemmatizer, script and language included, so
-                    // that a word the lemmatizer left alone compares equal.
-                    let surface = allow_prefix_search
-                        .then(|| original.get(token.byte_start..token.byte_end))
-                        .flatten()
-                        .map(|surface| {
-                            Token {
-                                lemma: std::borrow::Cow::Borrowed(surface),
-                                script: token.script,
-                                language: token.language,
-                                ..Default::default()
-                            }
-                            .normalize(&PREFIX_NORMALIZER_OPTION)
-                            .lemma
-                        })
-                        .filter(|surface| surface.as_ref() != word);
-                    let term = match surface {
-                        Some(surface) => partially_initialized_term_from_lemma(
-                            ctx,
-                            tokenizer,
-                            word,
-                            surface.as_ref(),
-                            nbr_typos(word),
-                        )?,
-                        None => partially_initialized_term_from_word(
-                            ctx,
-                            tokenizer,
-                            word,
-                            nbr_typos(word),
-                            allow_prefix_search,
-                            false,
-                        )?,
-                    };
-                    let located_term = LocatedQueryTerm {
-                        value: ctx.term_interner.push(term),
-                        positions: position..=position,
-                    };
-                    query_terms.push(located_term);
                 }
             }
             TokenKind::Separator(separator_kind) => {
@@ -328,6 +341,7 @@ pub fn make_ngram(
 
     let term = QueryTerm {
         original: ngram_str_interned,
+        lemma: None,
         ngram_words: Some(words_interned),
         is_prefix,
         max_levenshtein_distance: max_nbr_typos,
@@ -386,6 +400,7 @@ impl PhraseBuilder {
                 let phrase_desc = phrase.description(ctx);
                 QueryTerm {
                     original: ctx.word_interner.insert(phrase_desc),
+                    lemma: None,
                     ngram_words: None,
                     max_levenshtein_distance: 0,
                     is_prefix: false,

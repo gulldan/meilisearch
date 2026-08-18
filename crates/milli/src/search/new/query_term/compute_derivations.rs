@@ -181,6 +181,7 @@ pub fn partially_initialized_term_from_word(
         return Ok({
             QueryTerm {
                 original: ctx.word_interner.insert(word.to_owned()),
+                lemma: None,
                 ngram_words: None,
                 is_prefix: false,
                 max_levenshtein_distance: 0,
@@ -243,6 +244,7 @@ pub fn partially_initialized_term_from_word(
 
     Ok(QueryTerm {
         original: word_interned,
+        lemma: None,
         ngram_words: None,
         max_levenshtein_distance: max_typo,
         is_prefix,
@@ -252,27 +254,42 @@ pub fn partially_initialized_term_from_word(
     })
 }
 
-/// Term for the last word of a query once lemmatization has changed it.
+/// Терм слова запроса, которое лемматизатор изменил.
 ///
-/// The index holds lemmas, so the lemma is what matches whole words; the
-/// surface form is what the user is still typing, so it is the one that keeps
-/// prefix search alive.
+/// Основа терма — поверхностная форма: её набрал пользователь, поэтому от неё
+/// считаются префикс, опечатки и разбиение слова — ровно так, как в стоке.
+/// Лемма идёт рядом: беcопечаточным словом, потому что индекс хранит леммы и
+/// только она находит документ целиком, даже когда язык запроса угадан не тот,
+/// что был у поля при индексации, — и своей окрестностью по опечаткам, потому
+/// что словарь на двух концах может разойтись на букву.
 pub fn partially_initialized_term_from_lemma(
     ctx: &mut SearchContext<'_>,
     tokenizer: &Tokenizer<'_>,
     lemma: &str,
     surface: &str,
     max_typo: u8,
+    lemma_typo: u8,
+    is_prefix: bool,
 ) -> Result<QueryTerm> {
     let mut term =
-        partially_initialized_term_from_word(ctx, tokenizer, lemma, max_typo, false, false)?;
-    let from_surface =
-        partially_initialized_term_from_word(ctx, tokenizer, surface, max_typo, true, false)?;
+        partially_initialized_term_from_word(ctx, tokenizer, surface, max_typo, is_prefix, false)?;
+    // Префикс лемме не нужен: её никто не дописывает, — а опечатки ей отмерены
+    // отдельно и считаются лениво, вместе с опечатками поверхностной формы.
+    let from_lemma = partially_initialized_term_from_word(ctx, tokenizer, lemma, 0, false, false)?;
 
-    term.zero_typo.prefix_of.extend(from_surface.zero_typo.exact);
-    term.zero_typo.prefix_of.extend(from_surface.zero_typo.prefix_of);
-    term.zero_typo.synonyms.extend(from_surface.zero_typo.synonyms);
-    term.zero_typo.use_prefix_db = from_surface.zero_typo.use_prefix_db;
+    match (term.zero_typo.exact, from_lemma.zero_typo.exact) {
+        // Поверхностной формы в индексе нет — тогда точное совпадение это
+        // лемма, иначе правило exactness перестало бы видеть словарный поиск.
+        (None, exact @ Some(_)) => term.zero_typo.exact = exact,
+        (Some(_), Some(lemma_word)) => {
+            term.zero_typo.prefix_of.insert(lemma_word);
+        }
+        _ => (),
+    }
+    term.zero_typo.synonyms.extend(from_lemma.zero_typo.synonyms);
+    // Больше опечаток, чем отмерено самому терму, лемме не дать: стоимости
+    // опечаток у терма одни на всех, и лишнюю ступень просто некуда положить.
+    term.lemma = Some((from_lemma.original, lemma_typo.min(max_typo)));
 
     Ok(term)
 }
@@ -292,6 +309,7 @@ impl Interned<QueryTerm> {
         let allows_split_words = self_mut.allows_split_words();
         let QueryTerm {
             original,
+            lemma,
             is_prefix,
             one_typo,
             max_levenshtein_distance: max_nbr_typos,
@@ -299,6 +317,7 @@ impl Interned<QueryTerm> {
         } = self_mut;
 
         let original = *original;
+        let lemma = *lemma;
         let is_prefix = *is_prefix;
         // let original_str = ctx.word_interner.get(*original).to_owned();
         if one_typo.is_init() {
@@ -308,6 +327,12 @@ impl Interned<QueryTerm> {
 
         if *max_nbr_typos > 0 {
             find_one_typo_derivations(ctx, original, is_prefix, &mut one_typo_words)?;
+        }
+
+        // Окрестность леммы: индекс полон лемм, и расхождение словарей на букву
+        // ловится только отсюда.
+        if let Some((lemma, _)) = lemma.filter(|(_, typos)| *typos > 0) {
+            find_one_typo_derivations(ctx, lemma, false, &mut one_typo_words)?;
         }
 
         let split_words = if allows_split_words {
@@ -344,27 +369,45 @@ impl Interned<QueryTerm> {
         let self_mut = ctx.term_interner.get_mut(self);
         let QueryTerm {
             original,
+            lemma,
             is_prefix,
             two_typo,
             max_levenshtein_distance: max_nbr_typos,
             ..
         } = self_mut;
-        let original_str = ctx.word_interner.get(*original).to_owned();
+        let (original, lemma, is_prefix, max_nbr_typos) =
+            (*original, *lemma, *is_prefix, *max_nbr_typos);
+        let original_str = ctx.word_interner.get(original).to_owned();
         if two_typo.is_init() {
             return Ok(());
         }
         let mut one_typo_words = BTreeSet::new();
         let mut two_typo_words = BTreeSet::new();
 
-        if *max_nbr_typos > 0 {
+        if max_nbr_typos > 0 {
             find_one_two_typo_derivations(
-                *original,
-                *is_prefix,
+                original,
+                is_prefix,
                 ctx.index.words_fst(ctx.txn)?,
                 &mut ctx.word_interner,
                 &mut one_typo_words,
                 &mut two_typo_words,
             )?;
+        }
+
+        // Окрестность леммы: индекс полон лемм, и расхождение словарей на букву
+        // ловится только отсюда.
+        match lemma {
+            Some((lemma, 1)) => find_one_typo_derivations(ctx, lemma, false, &mut one_typo_words)?,
+            Some((lemma, typos)) if typos > 1 => find_one_two_typo_derivations(
+                lemma,
+                false,
+                ctx.index.words_fst(ctx.txn)?,
+                &mut ctx.word_interner,
+                &mut one_typo_words,
+                &mut two_typo_words,
+            )?,
+            _ => (),
         }
 
         let split_words = find_split_words(ctx, original_str.as_str())?;
