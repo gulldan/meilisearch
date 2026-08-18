@@ -521,10 +521,7 @@ mod tests {
     fn mismatch_names_every_way_two_bundles_can_disagree() {
         let recorded = generations(&[("rus", "g1"), ("fin", "g1"), ("deu", "g1")]);
         let loaded = generations(&[("rus", "g1"), ("fin", "g2"), ("spa", "g1")]);
-        assert_eq!(
-            Mismatch::between(&recorded, &loaded).to_string(),
-            "missing: deu; changed: fin"
-        );
+        assert_eq!(Mismatch::between(&recorded, &loaded).to_string(), "missing: deu; changed: fin");
     }
 
     #[test]

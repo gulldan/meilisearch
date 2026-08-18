@@ -341,8 +341,11 @@ pub(in crate::search) fn resolve_negative_phrases(
 ) -> Result<RoaringBitmap> {
     let mut negative_bitmap = RoaringBitmap::new();
     for term in negative_phrases {
-        let query_term = ctx.term_interner.get(term.value);
-        if let Some(phrase) = query_term.original_phrase() {
+        // Исключается всё, что фраза нашла бы, — и лемма, и набранное
+        // написание: иначе `-"мыла"` оставил бы документ, который `"мыла"`
+        // находит.
+        let phrases: Vec<_> = ctx.term_interner.get(term.value).phrase_writings().collect();
+        for phrase in phrases {
             negative_bitmap |= ctx.get_phrase_docids(phrase)?;
         }
     }
