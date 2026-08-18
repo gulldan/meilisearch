@@ -2,6 +2,8 @@ use heed::RwTxn;
 use roaring::RoaringBitmap;
 use time::OffsetDateTime;
 
+use std::collections::BTreeSet;
+
 use crate::database_stats::DatabaseStats;
 use crate::{FieldDistribution, Index, Result};
 
@@ -64,6 +66,8 @@ impl<'t, 'i> ClearDocuments<'t, 'i> {
         self.index.put_words_prefixes_fst(self.wtxn, &fst::Set::default())?;
         self.index.put_documents_ids(self.wtxn, &empty_roaring)?;
         self.index.put_field_distribution(self.wtxn, &FieldDistribution::default())?;
+        // Ни одного слова не осталось — значит, и ни одного словаря за ними.
+        self.index.stamp_lemmatizer_generations(self.wtxn, &BTreeSet::new())?;
         self.index.delete_geo_rtree(self.wtxn)?;
         self.index.delete_geo_faceted_documents_ids(self.wtxn)?;
 

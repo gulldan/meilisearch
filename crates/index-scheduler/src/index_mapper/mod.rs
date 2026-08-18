@@ -140,6 +140,9 @@ pub struct IndexStats {
     /// Generation of every lemmatizer dictionary that filled the index, keyed by
     /// ISO 639-3 code. `None` for an index last written before they were
     /// recorded, empty for one filled without dictionaries.
+    ///
+    /// Только языки этого индекса: бандл целиком тут не при чём, и весит это
+    /// столько же, сколькими языками индекс на самом деле уложен.
     #[serde(default)]
     pub lemmatizer_generations: Option<Generations>,
     /// Creation date of the index.
@@ -488,7 +491,7 @@ impl IndexMapper {
         };
 
         index
-            .check_lemmatizer_generations(name)
+            .check_lemmatizer_generations(name, uuid)
             .map_err(|error| Error::from_milli(error, Some(name.to_string())))?;
 
         Ok(index)

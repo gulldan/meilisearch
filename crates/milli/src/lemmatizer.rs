@@ -19,23 +19,36 @@
 //! the documents are there, the tasks succeeded, the words are simply not
 //! found. So every index records the [`Generations`] it was built with, and
 //! [`check_index`] says out loud when they are not the ones loaded.
+//!
+//! Пишется при этом не весь бандл, а только языки, словари которых на
+//! самом деле применились: чем индекс не лемматизировали, то его и не касается.
+//! О применённых говорит [`Recording`] — окно, которое индексатор держит открытым
+//! на время своего прогона.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::{fmt, fs};
 
 use charabia::normalizer::Lemmatizer as LemmatizerTrait;
 use charabia::Language;
 use serde::Deserialize;
 use udlex_rs::{catalog, Error, Lexicon, Options, Source};
+use uuid::Uuid;
+
+use crate::ThreadPoolNoAbort;
 
 static LEMMATIZER: OnceLock<Lemmatizer> = OnceLock::new();
 
 /// Indexes already compared against the loaded dictionaries, so that a
 /// mismatch is reported once per index instead of once per request.
-static CHECKED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+///
+/// Ключ — пара «что лежит на диске» и «как его сейчас зовут»: `swap-indexes`
+/// меняет под именем содержимое, а переименование — имя под содержимым;
+/// по одному uid проверка после такого обмена больше не повторилась бы.
+static CHECKED: Mutex<BTreeSet<(Uuid, String)>> = Mutex::new(BTreeSet::new());
 
 /// How many language codes a mismatch lists before it sums the rest up: a
 /// bundle carries dozens of them, and what matters is that they disagree.
@@ -51,6 +64,9 @@ pub type Generations = BTreeMap<String, String>;
 /// The dictionaries of every language found in a bundle directory.
 pub struct Lemmatizer {
     lexicons: HashMap<Language, Lexicon>,
+    /// Какой ISO 639-3 код у языка charabia: лемматизация отчитывается
+    /// языками, а штамп хранит коды.
+    codes: HashMap<Language, String>,
     generations: Generations,
 }
 
@@ -64,6 +80,7 @@ impl Lemmatizer {
     /// unreadable.
     pub fn open(directory: &Path) -> Result<Self, Error> {
         let mut lexicons = HashMap::new();
+        let mut codes = HashMap::new();
         let mut generations = Generations::new();
         for (code, path) in catalog(directory)? {
             let Some(language) = Language::from_code(&code) else {
@@ -72,15 +89,16 @@ impl Lemmatizer {
             };
             match generation(&path) {
                 Some(stamp) => {
-                    generations.insert(code, stamp);
+                    generations.insert(code.clone(), stamp);
                 }
                 // Not fatal: the dictionary still lemmatizes, it just cannot be
                 // told apart from another build of the same language.
                 None => tracing::warn!("lemmatizer: dictionary {code} names no generation"),
             }
+            codes.insert(language, code);
             lexicons.insert(language, Lexicon::open(path)?);
         }
-        Ok(Self { lexicons, generations })
+        Ok(Self { lexicons, codes, generations })
     }
 
     /// The languages this lemmatizer answers for.
@@ -109,7 +127,12 @@ impl LemmatizerTrait for Lemmatizer {
         language: Option<Language>,
         sentence_initial: bool,
     ) -> Option<Cow<'o, str>> {
-        let lexicon = self.lexicons.get(&language?)?;
+        let language = language?;
+        let lexicon = self.lexicons.get(&language)?;
+        // Словарь взялся за слово — значит, если сейчас идёт индексация,
+        // в индекс ляжет то, что сказал именно этот словарь. Вне окна
+        // записи вызов — одна проверка локальной переменной потока.
+        note(language);
         // The lexicon lends its strings for as long as it is borrowed, which is
         // shorter than the token it answers about, so a changed word is handed
         // over owned. An unchanged one keeps borrowing the token itself.
@@ -220,11 +243,107 @@ pub fn get() -> Option<&'static Lemmatizer> {
 
 /// What the dictionaries of this process are, empty when there are none.
 ///
-/// This is what indexing stamps on an index. The empty set is a statement in
-/// its own right — *built without dictionaries* — and differs from an index
-/// that recorded nothing at all.
+/// Это то, с чем сверяется штамп, а не то, что в него пишут: индексу
+/// принадлежат только языки, которыми его лемматизировали.
 pub fn generations() -> Generations {
     get().map_or_else(Generations::new, |lemmatizer| lemmatizer.generations.clone())
+}
+
+/// Поколения словарей перечисленных языков — ровно то, что уложило слова.
+///
+/// Язык без словаря и словарь без поколения выпадают: назвать их нечем, а
+/// придумывать имя значило бы поднять тревогу на пустом месте.
+pub fn generations_of(languages: &BTreeSet<Language>) -> Generations {
+    let Some(lemmatizer) = get() else { return Generations::new() };
+    languages
+        .iter()
+        .filter_map(|language| lemmatizer.codes.get(language))
+        .filter_map(|code| {
+            lemmatizer.generations.get(code).map(|stamp| (code.clone(), stamp.clone()))
+        })
+        .collect()
+}
+
+/// Словари, применённые за один прогон индексации.
+///
+/// Поток пула копит наблюдения у себя и отдаёт их сюда, закрывая окно: у
+/// одного документа языков единицы, а замок на каждое слово стоил бы дороже
+/// самого похода в словарь.
+#[derive(Debug, Default)]
+struct Applied(Mutex<BTreeSet<Language>>);
+
+thread_local! {
+    /// Куда этот поток складывает применённые словари. Пусто у всех, кроме
+    /// позванных в окно: те же словари применяет и поиск, но он говорит о
+    /// запросе, а не о том, чем уложен индекс.
+    static RECORDING: RefCell<Option<(Arc<Applied>, BTreeSet<Language>)>> =
+        const { RefCell::new(None) };
+}
+
+/// Отмечает, что словарь этого языка применился на этом потоке.
+fn note(language: Language) {
+    RECORDING.with_borrow_mut(|slot| {
+        if let Some((_, seen)) = slot.as_mut() {
+            seen.insert(language);
+        }
+    });
+}
+
+/// Окно, за время которого прогон индексации узнаёт, чем он лемматизировал.
+///
+/// Открывается на всех потоках пула индексации и только на них: токенизация
+/// документов целиком идёт через `pool.install`, а поиск живёт на потоках
+/// HTTP и в окно не попадает — иначе чужой запрос дописывал бы индексу языки,
+/// которых в нём нет.
+///
+/// Пул на процесс один, и батчи он обрабатывает по одному, так что два окна
+/// одновременно не открываются.
+pub struct Recording<'pool> {
+    /// `None`, когда окно уже закрыто или открывать его не для чего.
+    pool: Option<&'pool ThreadPoolNoAbort>,
+    applied: Arc<Applied>,
+}
+
+impl<'pool> Recording<'pool> {
+    /// Открывает окно. Без словарей записывать нечего, и пул не тревожат.
+    pub fn open(pool: &'pool ThreadPoolNoAbort) -> Self {
+        let applied = Arc::<Applied>::default();
+        if get().is_none() {
+            return Self { pool: None, applied };
+        }
+        // Ошибку рассылки глотаем: паника в пуле всплывёт там, где её ловит
+        // сама индексация, а штамп из-за неё терять незачем.
+        let _ = pool.broadcast(|_| {
+            RECORDING.with_borrow_mut(|slot| *slot = Some((applied.clone(), BTreeSet::new())));
+        });
+        Self { pool: Some(pool), applied }
+    }
+
+    /// Языки, чьи словари в этом окне применились. Закрывает окно.
+    pub fn languages(&mut self) -> BTreeSet<Language> {
+        self.close();
+        std::mem::take(&mut self.applied.0.lock().unwrap())
+    }
+
+    /// Снимает запись с потоков пула, забирая накопленное. Повторный вызов
+    /// ничего не делает — тем и годится для [`Drop`].
+    fn close(&mut self) {
+        let Some(pool) = self.pool.take() else { return };
+        let _ = pool.broadcast(|_| {
+            RECORDING.with_borrow_mut(|slot| {
+                if let Some((applied, seen)) = slot.take() {
+                    applied.0.lock().unwrap().extend(seen);
+                }
+            });
+        });
+    }
+}
+
+impl Drop for Recording<'_> {
+    /// Прогон, оборвавшийся на ошибке, не оставляет пул размеченным.
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 /// Warns when an index was filled by other dictionaries than the loaded ones,
@@ -236,40 +355,48 @@ pub fn generations() -> Generations {
 /// An index last written before generations were recorded holds none, and
 /// there is nothing to compare it against: stay quiet rather than accuse every
 /// pre-existing database at every start-up. The next indexing stamps it.
+///
+/// Пара `uid` и `uuid` — это и есть проверяемое: имя, под которым индекс
+/// отвечает, вместе с данными, которые под этим именем лежат. `swap-indexes`
+/// меняет второе, не трогая первого, и проверка обязана пройти заново.
 pub fn check_index(
     uid: &str,
+    uuid: Uuid,
     recorded: impl FnOnce() -> crate::Result<Option<Generations>>,
 ) -> crate::Result<()> {
-    if !CHECKED.lock().unwrap().insert(uid.to_owned()) {
+    if !CHECKED.lock().unwrap().insert((uuid, uid.to_owned())) {
         return Ok(());
     }
     let Some(recorded) = recorded()? else { return Ok(()) };
     let loaded = generations();
-    if recorded == loaded {
+    let mismatch = Mismatch::between(&recorded, &loaded);
+    if mismatch.is_empty() {
         return Ok(());
     }
     tracing::warn!(
         "lemmatizer: index {uid:?} was filled by other dictionaries than the ones loaded now \
          ({}); it stays searchable, but words stored as lemmas may not be found until it is \
          reindexed — /indexes/{uid}/stats reports what filled it",
-        Mismatch::between(&recorded, &loaded)
+        mismatch
     );
     Ok(())
 }
 
 /// How the dictionaries that filled an index differ from the loaded ones.
+///
+/// Сравнение идёт по записям индекса и только по ним. Язык, которого в бандле
+/// прибавилось, ни одного слова этого индекса не трогал: у бандла своя жизнь,
+/// и предъявлять её индексу не за что.
 struct Mismatch<'a> {
     /// Filled the index, absent from this process.
     missing: Vec<&'a str>,
     /// Loaded, but not the generation the index was filled by.
     changed: Vec<&'a str>,
-    /// Loaded, and unknown to the index.
-    added: Vec<&'a str>,
 }
 
 impl<'a> Mismatch<'a> {
     fn between(recorded: &'a Generations, loaded: &'a Generations) -> Self {
-        let mut mismatch = Self { missing: Vec::new(), changed: Vec::new(), added: Vec::new() };
+        let mut mismatch = Self { missing: Vec::new(), changed: Vec::new() };
         for (code, generation) in recorded {
             match loaded.get(code) {
                 None => mismatch.missing.push(code),
@@ -277,21 +404,19 @@ impl<'a> Mismatch<'a> {
                 Some(_) => (),
             }
         }
-        mismatch.added = loaded
-            .keys()
-            .filter(|code| !recorded.contains_key(*code))
-            .map(String::as_str)
-            .collect();
         mismatch
+    }
+
+    /// Ни одного расхождения — молчать.
+    fn is_empty(&self) -> bool {
+        self.missing.is_empty() && self.changed.is_empty()
     }
 }
 
 impl fmt::Display for Mismatch<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut separator = "";
-        for (label, codes) in
-            [("missing", &self.missing), ("changed", &self.changed), ("added", &self.added)]
-        {
+        for (label, codes) in [("missing", &self.missing), ("changed", &self.changed)] {
             if codes.is_empty() {
                 continue;
             }
@@ -340,8 +465,15 @@ mod tests {
         let loaded = generations(&[("rus", "g1"), ("fin", "g2"), ("spa", "g1")]);
         assert_eq!(
             Mismatch::between(&recorded, &loaded).to_string(),
-            "missing: deu; changed: fin; added: spa"
+            "missing: deu; changed: fin"
         );
+    }
+
+    #[test]
+    fn a_bundle_that_only_grew_is_no_mismatch() {
+        let recorded = generations(&[("rus", "g1")]);
+        let loaded = generations(&[("rus", "g1"), ("bre", "g1"), ("fin", "g1")]);
+        assert!(Mismatch::between(&recorded, &loaded).is_empty());
     }
 
     #[test]

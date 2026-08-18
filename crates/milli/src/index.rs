@@ -6,7 +6,7 @@ use std::fs::File;
 use std::path::Path;
 
 use cellulite::Cellulite;
-use charabia::Tokenizer;
+use charabia::{Language, Tokenizer};
 use heed::types::{SerdeJson, *};
 use heed::{CompactionOption, Database, DatabaseStat, RoTxn, RwTxn, Unspecified, WithoutTls};
 use indexmap::IndexMap;
@@ -92,7 +92,11 @@ pub mod main_key {
     pub const DISABLED_TYPOS_TERMS: &str = "disabled_typos_terms";
     pub const CHAT: &str = "chat";
     pub const VECTOR_STORE_BACKEND: &str = "vector_store_backend";
+    /// Штамп прежнего вида: поколения всего загруженного бандла. Больше не
+    /// читается и стирается при первой же записи нового.
     pub const LEMMATIZER_GENERATIONS: &str = "lemmatizer_generations";
+    /// Поколения словарей ровно тех языков, которыми индекс лемматизировали.
+    pub const LEMMATIZER_DICTIONARIES: &str = "lemmatizer_dictionaries";
 }
 
 pub mod db_name {
@@ -1836,29 +1840,56 @@ impl Index {
     ///
     /// `None` for an index last written before they were recorded: unknown, not
     /// empty. An index filled without dictionaries records the empty set.
+    ///
+    /// Штамп прежнего вида здесь не виден: он перечислял весь бандл, а не
+    /// языки индекса, и отвечать за индекс не может. Такая база молчит, пока
+    /// её не перестроят, — ровно как база, записанная до штампов вообще.
     pub fn lemmatizer_generations(&self, rtxn: &RoTxn<'_>) -> heed::Result<Option<Generations>> {
         self.main
             .remap_types::<Str, SerdeJson<Generations>>()
-            .get(rtxn, main_key::LEMMATIZER_GENERATIONS)
+            .get(rtxn, main_key::LEMMATIZER_DICTIONARIES)
     }
 
-    pub(crate) fn put_lemmatizer_generations(
+    /// Отмечает индекс словарями, которыми только что лемматизировали.
+    ///
+    /// `applied` — языки, чьи словари в этом прогоне применились; их поколения
+    /// записываются заново. Об остальных прогон ничего не узнал: слова, что
+    /// уложили прежние словари, лежат как лежали, и записи о них переживают
+    /// прогон. Отсюда и главное свойство: прогон, не тронувший ни одного слова
+    /// — повторная заливка тех же документов, — не трогает и штамп.
+    ///
+    /// Пустому индексу переживать нечему: слова, старше этого прогона, в нём
+    /// не осталось ни одного, и штамп сводится к увиденному.
+    pub(crate) fn stamp_lemmatizer_generations(
         &self,
         wtxn: &mut RwTxn<'_>,
-        generations: &Generations,
-    ) -> heed::Result<()> {
+        applied: &BTreeSet<Language>,
+    ) -> Result<()> {
+        let known = self.lemmatizer_generations(wtxn)?;
+        let mut stamp = match known {
+            Some(known) if !self.documents_ids(wtxn)?.is_empty() => known,
+            _ => Generations::new(),
+        };
+        stamp.extend(crate::lemmatizer::generations_of(applied));
         self.main.remap_types::<Str, SerdeJson<Generations>>().put(
             wtxn,
-            main_key::LEMMATIZER_GENERATIONS,
-            generations,
-        )
+            main_key::LEMMATIZER_DICTIONARIES,
+            &stamp,
+        )?;
+        // Четыре килобайта на индекс, из которых к индексу относилась горстка
+        // строк: сносим, как только есть чем заменить.
+        self.main.remap_key_type::<Str>().delete(wtxn, main_key::LEMMATIZER_GENERATIONS)?;
+        Ok(())
     }
 
     /// Warns once per process when this index was filled by dictionaries other
     /// than the loaded ones. Searching it is never refused: a swapped bundle is
     /// worth shouting about, not worth taking an index offline for.
-    pub fn check_lemmatizer_generations(&self, uid: &str) -> Result<()> {
-        crate::lemmatizer::check_index(uid, || {
+    ///
+    /// `uuid` — то, что лежит под именем: после `swap-indexes` имя прежнее, а
+    /// индекс под ним другой, и проверять его надо заново.
+    pub fn check_lemmatizer_generations(&self, uid: &str, uuid: uuid::Uuid) -> Result<()> {
+        crate::lemmatizer::check_index(uid, uuid, || {
             let rtxn = self.read_txn()?;
             Ok(self.lemmatizer_generations(&rtxn)?)
         })

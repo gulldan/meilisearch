@@ -250,6 +250,8 @@ where
             crate::vector::error::PossibleEmbeddingMistakes::new(&field_distribution);
 
         let pool = &self.indexer_config.thread_pool;
+        // Старый путь токенизирует в том же пуле, и окно записи ему нужно то же.
+        let mut recording = crate::lemmatizer::Recording::open(pool);
 
         // create LMDB writer channel
         let (lmdb_writer_sx, lmdb_writer_rx): (
@@ -490,7 +492,8 @@ where
         self.index.put_field_distribution(self.wtxn, &field_distribution)?;
 
         // Everything that reaches this indexer has just been tokenized.
-        self.index.put_lemmatizer_generations(self.wtxn, &crate::lemmatizer::generations())?;
+        let applied = recording.languages();
+        self.index.stamp_lemmatizer_generations(self.wtxn, &applied)?;
 
         // We write the primary key field id into the main database
         self.index.put_primary_key(self.wtxn, &primary_key)?;

@@ -91,6 +91,10 @@ where
     let (grenad_parameters, total_bbbuffer_capacity) =
         indexer_memory_settings(pool.current_num_threads(), grenad_parameters);
 
+    // Окно открыто до первой токенизации: документы разбирают потоки этого
+    // пула, и только они вправе сказать, какими словарями лёг индекс.
+    let mut recording = crate::lemmatizer::Recording::open(pool);
+
     let (extractor_sender, writer_receiver) = pool
         .install(|| extractor_writer_bbqueue(&mut bbbuffers, total_bbbuffer_capacity, 1000))
         .unwrap();
@@ -244,7 +248,7 @@ where
     // Stamped where documents are tokenized rather than inside `update_index`:
     // a settings update that needs no reindexing writes no word, and must not
     // claim the stored ones came from the dictionaries loaded now.
-    index.put_lemmatizer_generations(wtxn, &crate::lemmatizer::generations())?;
+    index.stamp_lemmatizer_generations(wtxn, &recording.languages())?;
 
     Ok(congestion)
 }
@@ -303,6 +307,10 @@ where
 
     let (grenad_parameters, total_bbbuffer_capacity) =
         indexer_memory_settings(pool.current_num_threads(), grenad_parameters);
+
+    // Переиндексация по смене настроек перебирает документы заново, и языки
+    // ей приходится узнавать тем же способом.
+    let mut recording = crate::lemmatizer::Recording::open(pool);
 
     let (extractor_sender, writer_receiver) = pool
         .install(|| extractor_writer_bbqueue(&mut bbbuffers, total_bbbuffer_capacity, 1000))
@@ -462,7 +470,7 @@ where
         field_distribution,
         document_ids,
     )?;
-    index.put_lemmatizer_generations(wtxn, &crate::lemmatizer::generations())?;
+    index.stamp_lemmatizer_generations(wtxn, &recording.languages())?;
 
     Ok(congestion)
 }

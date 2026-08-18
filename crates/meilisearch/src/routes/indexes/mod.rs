@@ -601,6 +601,9 @@ pub struct IndexStats {
     /// Generation of every lemmatizer dictionary that filled the index, keyed
     /// by ISO 639-3 code. Absent from an index written before they were
     /// recorded, empty for one filled without dictionaries.
+    ///
+    /// Перечислены языки этого индекса, а не весь загруженный бандл: иначе
+    /// каждый индекс приписывал бы к ответу десятки чужих строк.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<HashMap<String, String>>)]
     pub lemmatizer_generations: Option<milli::lemmatizer::Generations>,

@@ -958,6 +958,7 @@ fn create_and_list_index() {
             "used_database_size": "[bytes]",
             "primary_key": null,
             "field_distribution": {},
+            "lemmatizer_generations": null,
             "created_at": "[date]",
             "updated_at": "[date]"
           }
