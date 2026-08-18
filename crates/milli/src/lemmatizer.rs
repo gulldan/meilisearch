@@ -8,6 +8,10 @@
 //!
 //! A word is only lemmatized when its language is known, and for most scripts
 //! that means `localizedAttributes` on the index and `locales` on the search.
+//! When more than one is named, the dictionaries themselves say which one the
+//! word belongs to — see [`Lemmatizer::resolve`]. Statistical detection cannot:
+//! it knows a fraction of the languages a bundle covers, and a single word is
+//! not enough text for it anyway.
 //!
 //! An index and the dictionaries that filled it are one pair: it stores lemmas,
 //! not the words the documents spell, so a query lemmatized by another bundle
@@ -25,7 +29,7 @@ use std::{fmt, fs};
 use charabia::normalizer::Lemmatizer as LemmatizerTrait;
 use charabia::Language;
 use serde::Deserialize;
-use udlex_rs::{catalog, Error, Lexicon};
+use udlex_rs::{catalog, Error, Lexicon, Options, Source};
 
 static LEMMATIZER: OnceLock<Lemmatizer> = OnceLock::new();
 
@@ -115,6 +119,69 @@ impl LemmatizerTrait for Lemmatizer {
         } else {
             Cow::Owned(lemma.into_owned())
         })
+    }
+
+    /// Спрашивает словари кандидатов, кто из них знает это слово.
+    ///
+    /// Правил два. Слово, которое словарь взял из корпуса своего языка, весит
+    /// больше слова из подключённого к нему внешнего справочника: справочники
+    /// разных языков пересекаются заимствованиями, именами и просто
+    /// совпадениями написания, и почти весь ложный выбор языка приходится на
+    /// них. При равном весе побеждает наименьший язык по порядку [`Language`].
+    ///
+    /// Наименьший, а не первый в списке: при индексации список — это локали
+    /// поля, на запросе — объединение локалей индекса, и совпадают они по
+    /// составу, а не по порядку. Ответ не должен зависеть ни от порядка, ни от
+    /// окружающего текста, иначе слово ляжет в индекс одной леммой, а искаться
+    /// будет другой.
+    ///
+    /// Кандидат, которому уже нечего выиграть, не спрашивается вовсе, так что
+    /// упорядоченный список — а Meilisearch отдаёт именно такой — обычно стоит
+    /// одного поиска по словарю, а не одного на язык.
+    ///
+    /// Правила по суффиксу здесь выключены: они отвечают на любое слово любого
+    /// языка и спор не разрешили бы, а стёрли.
+    fn resolve(
+        &self,
+        word: &str,
+        candidates: &[Language],
+        sentence_initial: bool,
+    ) -> Option<Language> {
+        let stored = Options { use_rules: false, ..Options::default() };
+        let mut chosen: Option<(Weight, Language)> = None;
+        for &language in candidates {
+            if chosen.is_some_and(|(weight, chosen)| weight == Weight::Corpus && chosen <= language)
+            {
+                continue;
+            }
+            let Some(lexicon) = self.lexicons.get(&language) else { continue };
+            let answer = lexicon.lemma_with_info(word, sentence_initial, stored);
+            if !answer.source.is_known() {
+                continue;
+            }
+            let candidate = (Weight::of(answer.source), language);
+            if chosen.is_none_or(|chosen| candidate < chosen) {
+                chosen = Some(candidate);
+            }
+        }
+        chosen.map(|(_, language)| language)
+    }
+}
+
+/// Насколько веско словарь знает слово: из корпуса своего языка или из
+/// подключённого к нему внешнего справочника.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Weight {
+    Corpus,
+    External,
+}
+
+impl Weight {
+    fn of(source: Source) -> Self {
+        match source {
+            Source::External | Source::ExternalLower => Self::External,
+            _ => Self::Corpus,
+        }
     }
 }
 
