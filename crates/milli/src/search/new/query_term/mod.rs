@@ -493,6 +493,14 @@ impl QueryTerm {
         self.zero_typo.phrase
     }
 
+    /// Все написания фразы: та, что легла в терм, и набранная пользователем.
+    ///
+    /// Вторая запись лежит там же, где у слова синонимы: другой развилки терм
+    /// не знает, — а искать и исключать фраза обязана одно и то же.
+    pub fn phrase_writings(&self) -> impl Iterator<Item = Interned<Phrase>> + '_ {
+        self.zero_typo.phrase.iter().chain(&self.zero_typo.synonyms).copied()
+    }
+
     pub fn all_computed_derivations(&self) -> (Vec<Interned<String>>, Vec<Interned<Phrase>>) {
         let mut words = BTreeSet::new();
         let mut phrases = BTreeSet::new();

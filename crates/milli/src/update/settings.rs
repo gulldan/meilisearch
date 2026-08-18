@@ -728,32 +728,35 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
                     .dedup()
                     .collect();
 
-                // Each locale gets its own tokenizer: a single allow list would
-                // only ever pick one language per script, and the key has to be
-                // reduced to a lemma under every language of the index.
-                let mut lemmatizing_builders = Vec::with_capacity(locales.len());
-                if let Some(lemmatizer) = crate::lemmatizer::get() {
-                    for locale in &locales {
-                        let mut builder = synonyms_tokenizer_builder(
-                            stop_words.as_ref(),
-                            separators.as_deref(),
-                            dictionary.as_deref(),
-                        );
-                        builder.allow_list(std::slice::from_ref(locale));
-                        builder.lemmatizer(lemmatizer);
-                        lemmatizing_builders.push(builder);
+                // Ключ нормализуется тем же конвейером, что и слово запроса:
+                // словарь и все локали индекса разом. Какому языку принадлежит
+                // само слово, отвечают словари — по токенизатору на локаль ключ
+                // ложился бы во все языки индекса сразу.
+                let mut lemmatizing_builder = synonyms_tokenizer_builder(
+                    stop_words.as_ref(),
+                    separators.as_deref(),
+                    dictionary.as_deref(),
+                );
+                // Локалей нет — язык называть некому: детектор читает текст, а
+                // ключ это одно-два слова. Тогда ключ остаётся тем, каким его
+                // записали, как и в стоке.
+                let lemmatizing_tokenizer = match crate::lemmatizer::get() {
+                    Some(lemmatizer) if !locales.is_empty() => {
+                        lemmatizing_builder.allow_list(&locales);
+                        lemmatizing_builder.lemmatizer(lemmatizer);
+                        Some(lemmatizing_builder.build())
                     }
-                }
-                let lemmatizing_tokenizers: Vec<_> =
-                    lemmatizing_builders.iter_mut().map(|builder| builder.build()).collect();
+                    _ => None,
+                };
 
                 let mut new_synonyms = HashMap::new();
                 for (original_word, synonyms) in user_synonyms {
                     // Normalize only the key. A query word reaches the database
                     // as a lemma, so a key written in an inflected form is also
-                    // stored under its lemma in every locale of the index.
+                    // stored under the lemma it gets in the language the
+                    // dictionaries name for it.
                     let mut keys = vec![normalize(&tokenizer, original_word)];
-                    for tokenizer in &lemmatizing_tokenizers {
+                    if let Some(tokenizer) = &lemmatizing_tokenizer {
                         let key = normalize(tokenizer, original_word);
                         if !keys.contains(&key) {
                             keys.push(key);
@@ -1689,8 +1692,8 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
     }
 }
 
-/// Tokenizer of a synonym key, without any lemmatizer: the lemmas of a key are
-/// gathered by dedicated tokenizers, one per locale of the index.
+/// Tokenizer of a synonym key. The lemmatizer and the locales of the index are
+/// added on top of it for the second, lemmatized reading of the same key.
 fn synonyms_tokenizer_builder<'a>(
     stop_words: Option<&'a fst::Set<&'a [u8]>>,
     separators: Option<&'a [&'a str]>,

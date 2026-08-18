@@ -112,7 +112,7 @@ pub fn located_query_terms_from_tokens(
                 // 2. if the word is not the last token of the query and is not a stop_word we push it as a non-prefix word,
                 // 3. if the word is the last token of the query we push it as a prefix word.
                 if let Some(phrase) = &mut phrase {
-                    phrase.push_word(ctx, &token, position)
+                    phrase.push_word(ctx, original, &token, position)
                 } else if negative_next_token {
                     let word = token.lemma().to_string();
                     let word = Word::Original(ctx.word_interner.insert(word));
@@ -330,7 +330,24 @@ pub fn make_ngram(
     )?;
 
     // Now add the synonyms
-    if let Some(synonyms) = ctx.index.synonyms.get(ctx.txn, &words)? {
+    //
+    // Многословный ключ лежит в базе в двух написаниях: как записан и весь в
+    // леммах, — а формы в запросе пользователь волен смешать: «мама мыла» это
+    // первое слово леммой, второе словоформой. Двух вопросов, набранными
+    // словами и их леммами, хватает на все сочетания.
+    let mut lemmas = Vec::with_capacity(terms.len());
+    for located_term in terms {
+        let located_term = ctx.term_interner.get(located_term.value);
+        let word = located_term.lemma.map_or(located_term.original, |(lemma, _)| lemma);
+        lemmas.push(ctx.word_interner.get(word).to_owned());
+    }
+
+    let mut keys = vec![&words];
+    if lemmas != words {
+        keys.push(&lemmas);
+    }
+    for key in keys {
+        let Some(synonyms) = ctx.index.synonyms.get(ctx.txn, key)? else { continue };
         for synonym in synonyms.synonyms(tokenizer) {
             let words =
                 synonym.into_iter().map(|w| Some(ctx.word_interner.insert(w.to_owned()))).collect();
@@ -357,13 +374,20 @@ pub fn make_ngram(
 
 struct PhraseBuilder {
     words: Vec<Option<crate::search::new::Interned<String>>>,
+    /// Те же позиции, но словами, как их набрал пользователь.
+    surface: Vec<Option<crate::search::new::Interned<String>>>,
     start: u16,
     end: u16,
 }
 
 impl PhraseBuilder {
     fn empty() -> Self {
-        Self { words: Default::default(), start: u16::MAX, end: u16::MAX }
+        Self {
+            words: Default::default(),
+            surface: Default::default(),
+            start: u16::MAX,
+            end: u16::MAX,
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -374,6 +398,7 @@ impl PhraseBuilder {
     fn push_word(
         &mut self,
         ctx: &mut SearchContext<'_>,
+        original: &str,
         token: &charabia::Token<'_>,
         position: u16,
     ) {
@@ -383,10 +408,18 @@ impl PhraseBuilder {
         self.end = position;
         if let TokenKind::StopWord = token.kind {
             self.words.push(None);
+            self.surface.push(None);
         } else {
             // token has kind Word
             let word = ctx.word_interner.insert(token.lemma().to_string());
             self.words.push(Some(word));
+            // Поверхностная форма берётся так же, как у одиночного слова, и
+            // той же меркой сравнивается с леммой.
+            let composed_word = composed(Cow::Borrowed(token.lemma()));
+            let surface = surface_form(original, token)
+                .filter(|surface| surface != &composed_word)
+                .map_or(word, |surface| ctx.word_interner.insert(surface.into_owned()));
+            self.surface.push(Some(surface));
         }
     }
 
@@ -394,28 +427,36 @@ impl PhraseBuilder {
         if self.is_empty() {
             return None;
         }
+        let PhraseBuilder { words, surface, start, end } = self;
+
+        // Поле без правила локали хранит написанное, поле с правилом — лемму, а
+        // кавычки не должны сужать запрос до одного из двух: иначе фраза теряет
+        // как раз тот документ, который её и содержит. Второе написание идёт
+        // синонимом: другой развилки терм-фраза не знает.
+        let typed =
+            (surface != words).then(|| ctx.phrase_interner.insert(Phrase { words: surface }));
+        let phrase = ctx.phrase_interner.insert(Phrase { words });
+        let phrase_desc = phrase.description(ctx);
+        let original = ctx.word_interner.insert(phrase_desc);
+
         Some(LocatedQueryTerm {
-            value: ctx.term_interner.push({
-                let phrase = ctx.phrase_interner.insert(Phrase { words: self.words });
-                let phrase_desc = phrase.description(ctx);
-                QueryTerm {
-                    original: ctx.word_interner.insert(phrase_desc),
-                    lemma: None,
-                    ngram_words: None,
-                    max_levenshtein_distance: 0,
-                    is_prefix: false,
-                    zero_typo: ZeroTypoTerm {
-                        phrase: Some(phrase),
-                        exact: None,
-                        prefix_of: BTreeSet::default(),
-                        synonyms: BTreeSet::default(),
-                        use_prefix_db: None,
-                    },
-                    one_typo: Lazy::Uninit,
-                    two_typo: Lazy::Uninit,
-                }
+            value: ctx.term_interner.push(QueryTerm {
+                original,
+                lemma: None,
+                ngram_words: None,
+                max_levenshtein_distance: 0,
+                is_prefix: false,
+                zero_typo: ZeroTypoTerm {
+                    phrase: Some(phrase),
+                    exact: None,
+                    prefix_of: BTreeSet::default(),
+                    synonyms: typed.into_iter().collect(),
+                    use_prefix_db: None,
+                },
+                one_typo: Lazy::Uninit,
+                two_typo: Lazy::Uninit,
             }),
-            positions: self.start..=self.end,
+            positions: start..=end,
         })
     }
 }
