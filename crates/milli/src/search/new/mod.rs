@@ -996,7 +996,7 @@ pub fn extract_tokens(
     let tokens = tokenizer.tokenize(query);
     drop(entered);
 
-    located_query_terms_from_tokens(ctx, &tokenizer, query, tokens, words_limit)
+    located_query_terms_from_tokens(ctx, &tokenizer, tokens, words_limit)
 }
 
 pub(crate) fn check_sort_criteria(

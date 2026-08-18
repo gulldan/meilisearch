@@ -4495,7 +4495,6 @@ dependencies = [
  "tracing",
  "twox-hash",
  "udlex-rs",
- "unicode-normalization",
  "ureq",
  "url",
  "utoipa",

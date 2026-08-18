@@ -1,9 +1,7 @@
-use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use charabia::normalizer::{NormalizedTokenIter, NormalizerOption};
-use charabia::{Normalize as _, SeparatorKind, Token, TokenKind, Tokenizer};
-use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization as _};
+use charabia::normalizer::NormalizedTokenIter;
+use charabia::{SeparatorKind, TokenKind, Tokenizer};
 
 use super::compute_derivations::{
     partially_initialized_term_from_lemma, partially_initialized_term_from_word,
@@ -27,49 +25,11 @@ pub struct ExtractedTokens {
     pub negative_phrases: Vec<LocatedQueryTerm>,
 }
 
-/// Normalization of a query word without the lemmatizer, to recover the form
-/// the user actually typed.
-const SURFACE_NORMALIZER_OPTION: NormalizerOption = NormalizerOption {
-    create_char_map: false,
-    lossy: true,
-    classifier: charabia::normalizer::ClassifierOption { stop_words: None, separators: None },
-    lemmatizer: None,
-};
-
-/// Слово так, как его набрал пользователь: тот же конвейер нормализации, что и
-/// у токенизатора, вплоть до письменности и языка, но без лемматизатора.
-///
-/// Charabia раскладывает букву на основу и знак (NFKD), а словарь отдаёт лемму
-/// собранной — собранной она и ложится в индекс. Поэтому поверхностную форму
-/// тоже собираем: иначе `мойки` осталось бы `мои` со знаком краткости, чего в
-/// индексе нет, и ни префикс, ни опечатки от такого слова не сработали бы.
-fn surface_form<'a>(original: &'a str, token: &Token<'_>) -> Option<Cow<'a, str>> {
-    let surface = original.get(token.byte_start..token.byte_end)?;
-    let surface = Token {
-        lemma: Cow::Borrowed(surface),
-        script: token.script,
-        language: token.language,
-        ..Default::default()
-    }
-    .normalize(&SURFACE_NORMALIZER_OPTION)
-    .lemma;
-    Some(composed(surface))
-}
-
-/// Слово в собранной форме (NFC), без копии, когда оно уже собрано.
-fn composed(text: Cow<'_, str>) -> Cow<'_, str> {
-    match is_nfc_quick(text.chars()) {
-        IsNormalized::Yes => text,
-        _ => Cow::Owned(text.nfc().collect()),
-    }
-}
-
 /// Convert the tokenised search query into a list of located query terms.
 #[tracing::instrument(level = "trace", skip_all, target = "search::query")]
 pub fn located_query_terms_from_tokens(
     ctx: &mut SearchContext<'_>,
     tokenizer: &Tokenizer<'_>,
-    original: &str,
     query: NormalizedTokenIter<'_, '_, '_, '_>,
     words_limit: Option<usize>,
 ) -> Result<ExtractedTokens> {
@@ -114,7 +74,11 @@ pub fn located_query_terms_from_tokens(
                 if let Some(phrase) = &mut phrase {
                     phrase.push_word(ctx, &token, position)
                 } else if negative_next_token {
-                    let word = token.lemma().to_string();
+                    // Исключается набранное слово, а не то, во что его свёл
+                    // словарь: «-мыла» обязано убирать документ, где написано
+                    // «мыла», ровно как в стоке. Лемма этого документа лежит в
+                    // индексе рядом, но пользователь вычёркивал не её.
+                    let word = token.surface().unwrap_or_else(|| token.lemma()).to_string();
                     let word = Word::Original(ctx.word_interner.insert(word));
                     negative_words.push(word);
                     negative_next_token = false;
@@ -127,18 +91,18 @@ pub fn located_query_terms_from_tokens(
                         // Последнее слово ищется префиксом: пользователь может
                         // его ещё набирать.
                         let is_prefix = is_last && allow_prefix_search;
-                        // Поверхностную форму несёт каждое слово, а не только
+                        // Набранную форму несёт каждое слово, а не только
                         // последнее. Язык запроса определяется по всей строке,
                         // поэтому лемма слова может разойтись с той, что легла в
                         // индекс, — и тогда документ находит только набранное.
                         // Ещё она держит префикс: лемматизация срезала бы его,
                         // а `мыши` обязано находить и `мышь`, и `мышиный`.
-                        // Сравнение — в собранной форме: разложенная буква это
-                        // не то изменение, ради которого стоит хранить обе.
-                        let composed_word = composed(Cow::Borrowed(word));
-                        let surface = surface_form(original, &token)
-                            .filter(|surface| surface != &composed_word);
-                        let term = match surface {
+                        //
+                        // Форму отдаёт сам токенизатор: она прошла ровно те же
+                        // шаги нормализации, что и лемма, и потому совпадает
+                        // байт в байт с тем, что о том же слове записал
+                        // индексатор.
+                        let term = match token.surface() {
                             // Опечаток каждому слову отмерено по его же длине:
                             // поверхностной форме — по набранному, лемме — по
                             // лемме, как было бы, ищи мы одну её.
@@ -146,8 +110,8 @@ pub fn located_query_terms_from_tokens(
                                 ctx,
                                 tokenizer,
                                 word,
-                                surface.as_ref(),
-                                nbr_typos(surface.as_ref()),
+                                surface,
+                                nbr_typos(surface),
                                 nbr_typos(word),
                                 is_prefix,
                             )?,
@@ -457,7 +421,7 @@ mod tests {
         )?;
         // panics with `attempt to add with overflow` before <https://github.com/meilisearch/meilisearch/issues/3785>
         let ExtractedTokens { query_terms, .. } =
-            located_query_terms_from_tokens(&mut ctx, &tokenizer, query, tokens, None)?;
+            located_query_terms_from_tokens(&mut ctx, &tokenizer, tokens, None)?;
         assert!(query_terms.is_empty());
 
         Ok(())

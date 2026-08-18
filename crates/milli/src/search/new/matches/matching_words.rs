@@ -74,12 +74,21 @@ impl MatchingWords {
     }
 
     /// Try to match the token with one of the located_words.
+    ///
+    /// Слово документа сравнивается обеими формами: индекс хранит и набранную,
+    /// и лемму, значит найтись документ мог по любой из них, — а подсветить
+    /// нужно то же самое слово текста.
     fn match_unique_words<'a>(&'a self, token: &Token<'_>) -> Option<MatchType<'a>> {
+        let starts_with = |word: &str| {
+            token.lemma().starts_with(word)
+                || token.surface().is_some_and(|surface| surface.starts_with(word))
+        };
+        let equals = |word: &str| token.lemma() == word || token.surface() == Some(word);
         for located_words in &self.words {
             for word in &located_words.value {
                 let word = self.word_interner.get(*word);
                 // if the word is a prefix we match using starts_with.
-                if located_words.is_prefix && token.lemma().starts_with(word) {
+                if located_words.is_prefix && starts_with(word) {
                     let Some((char_index, c)) =
                         word.char_indices().take(located_words.original_char_count).last()
                     else {
@@ -90,7 +99,7 @@ impl MatchingWords {
                     let ids = &located_words.positions;
                     return Some(MatchType::Full { ids, char_count, byte_len });
                 // else we exact match the token.
-                } else if token.lemma() == word {
+                } else if equals(word) {
                     let ids = &located_words.positions;
                     return Some(MatchType::Full {
                         char_count: token.char_end - token.char_start,
@@ -273,7 +282,7 @@ pub(crate) mod tests {
         let query = "split this world";
         let tokens = tokenizer.tokenize(query);
         let ExtractedTokens { query_terms, .. } =
-            located_query_terms_from_tokens(&mut ctx, &tokenizer, query, tokens, None).unwrap();
+            located_query_terms_from_tokens(&mut ctx, &tokenizer, tokens, None).unwrap();
         let matching_words = MatchingWords::new(ctx, query_terms);
 
         assert_eq!(
