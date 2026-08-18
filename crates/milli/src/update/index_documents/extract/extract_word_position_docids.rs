@@ -4,6 +4,7 @@ use std::io::{self, BufReader};
 
 use obkv::KvReaderU16;
 
+use super::extract_docid_word_positions::word_forms;
 use super::helpers::{
     create_sorter, sorter_into_reader, try_split_array_at, GrenadParameters,
     MergeDeladdCboRoaringBitmaps,
@@ -63,17 +64,17 @@ pub fn extract_word_position_docids<R: io::Read + io::Seek>(
         let del_add_reader = KvReaderDelAdd::from_slice(value);
         // extract all unique words to remove.
         if let Some(deletion) = del_add_reader.get(DelAdd::Deletion) {
-            for (position, word_bytes) in KvReaderU16::from_slice(deletion).iter() {
+            for (position, forms) in KvReaderU16::from_slice(deletion).iter() {
                 let position = bucketed_position(position);
-                del_word_positions.insert((position, word_bytes.to_vec()));
+                del_word_positions.extend(word_forms(forms).map(|word| (position, word.to_vec())));
             }
         }
 
         // extract all unique additional words.
         if let Some(addition) = del_add_reader.get(DelAdd::Addition) {
-            for (position, word_bytes) in KvReaderU16::from_slice(addition).iter() {
+            for (position, forms) in KvReaderU16::from_slice(addition).iter() {
                 let position = bucketed_position(position);
-                add_word_positions.insert((position, word_bytes.to_vec()));
+                add_word_positions.extend(word_forms(forms).map(|word| (position, word.to_vec())));
             }
         }
     }

@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::{fmt, fs};
 
 use charabia::normalizer::Lemmatizer as LemmatizerTrait;
-use charabia::Language;
+use charabia::{Language, Token};
 use serde::Deserialize;
 use udlex_rs::{catalog, Error, Lexicon, Options, Source};
 use uuid::Uuid;
@@ -228,6 +228,27 @@ impl Weight {
             Source::External | Source::ExternalLower => Self::External,
             _ => Self::Corpus,
         }
+    }
+}
+
+/// Формы слова, которые ложатся в индекс: набранная и, когда словарь её
+/// изменил, лемма. Отвечает обоим индексаторам, новому и легаси, — индекс
+/// обязан выйти один и тот же, каким путём его ни строй.
+///
+/// Индекс Meilisearch устроен вокруг «в индексе то, что написано»: по набранной
+/// форме работают набор по буквам, точное совпадение, исключение слова и
+/// порядок выдачи. Лемма кладётся сверху и на ту же позицию.
+///
+/// Каждая форма проверяется отдельно: словарь может отдать лемму длиннее ключа
+/// LMDB, и это не повод терять написанное.
+pub fn indexed_forms<'t>(token: &'t Token<'_>) -> Option<(&'t str, Option<&'t str>)> {
+    let indexable = |word: &'t str| {
+        let word = word.trim();
+        (!word.is_empty() && word.len() <= crate::MAX_WORD_LENGTH).then_some(word)
+    };
+    match (token.surface().and_then(indexable), indexable(token.lemma())) {
+        (Some(surface), lemma) => Some((surface, lemma)),
+        (None, lemma) => lemma.map(|lemma| (lemma, None)),
     }
 }
 
@@ -450,7 +471,44 @@ struct Metadata {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
+
+    fn token(lemma: &str, surface: Option<&str>) -> Token<'static> {
+        Token {
+            lemma: Cow::Owned(lemma.to_owned()),
+            surface: surface.map(|surface| Cow::Owned(surface.to_owned())),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_word_the_dictionary_left_alone_goes_in_once() {
+        assert_eq!(indexed_forms(&token("рама", None)), Some(("рама", None)));
+    }
+
+    #[test]
+    fn a_lemmatized_word_goes_in_as_written_and_as_lemma() {
+        assert_eq!(indexed_forms(&token("мыть", Some("мыла"))), Some(("мыла", Some("мыть"))));
+    }
+
+    #[test]
+    fn a_form_that_does_not_fit_the_key_is_dropped_alone() {
+        let long = "я".repeat(crate::MAX_WORD_LENGTH);
+        // Не влезла лемма — набранное всё равно ложится.
+        assert_eq!(indexed_forms(&token(&long, Some("мыла"))), Some(("мыла", None)));
+        // Не влезло набранное — его место занимает лемма, а не пустота.
+        assert_eq!(indexed_forms(&token("мыть", Some(&long))), Some(("мыть", None)));
+        // Не влезло ничего — слова нет.
+        assert_eq!(indexed_forms(&token(&long, Some(&long))), None);
+    }
+
+    #[test]
+    fn an_empty_word_is_not_stored() {
+        assert_eq!(indexed_forms(&token("   ", None)), None);
+        assert_eq!(indexed_forms(&token("мыть", Some("  "))), Some(("мыть", None)));
+    }
 
     fn generations(pairs: &[(&str, &str)]) -> Generations {
         pairs
