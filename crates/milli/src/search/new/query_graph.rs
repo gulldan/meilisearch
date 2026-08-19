@@ -13,7 +13,7 @@ use super::query_term::{
 use super::small_bitmap::SmallBitmap;
 use super::SearchContext;
 use crate::search::new::interner::Interner;
-use crate::search::new::resolve_query_graph::compute_query_term_subset_docids;
+use crate::search::new::resolve_query_graph::compute_query_term_subset_written_docids;
 use crate::Result;
 
 /// A node of the [`QueryGraph`].
@@ -310,7 +310,7 @@ impl QueryGraph {
             for (_, node) in self.nodes.iter() {
                 match &node.data {
                     QueryNodeData::Term(t) => {
-                        let docids = compute_query_term_subset_docids(ctx, None, &t.term_subset)?;
+                        let docids = compute_query_term_subset_written_docids(ctx, &t.term_subset)?;
                         for id in t.term_ids.clone() {
                             term_docids
                                 .entry(id)

@@ -323,6 +323,7 @@ pub fn make_ngram(
     let term = QueryTerm {
         original: ngram_str_interned,
         lemma: None,
+        lemma_derivations: Default::default(),
         ngram_words: Some(words_interned),
         is_prefix,
         max_levenshtein_distance: max_nbr_typos,
@@ -406,6 +407,7 @@ impl PhraseBuilder {
             value: ctx.term_interner.push(QueryTerm {
                 original,
                 lemma: None,
+                lemma_derivations: Default::default(),
                 ngram_words: None,
                 max_levenshtein_distance: 0,
                 is_prefix: false,

@@ -58,6 +58,49 @@ pub fn compute_query_term_subset_docids(
     }
 }
 
+/// Документы терма, посчитанные по написанным формам.
+///
+/// Стратегия `frequency` выкидывает из запроса самое частое слово, а частота
+/// слова со словарём — это частота всей его парадигмы. От этого самым частым
+/// становится другое слово, чем без словаря, выживает другое, и выдача теряет
+/// документы, которые сток находит. Частота поэтому меряется по написанному:
+/// какое слово выживет, решает набранный запрос, а искать выжившее слово будет
+/// уже словарь — и найдёт не меньше стока.
+///
+/// Слово, которое в терм принесла лемма, в счёт не идёт по той же причине.
+pub fn compute_query_term_subset_written_docids(
+    ctx: &mut SearchContext<'_>,
+    term: &QueryTermSubset,
+) -> Result<RoaringBitmap> {
+    let mut docids = RoaringBitmap::new();
+    // Слова терма считаются первыми: пока они не посчитаны, не посчитана и
+    // окрестность леммы по опечаткам, а её надо знать целиком — иначе один и
+    // тот же терм весит по-разному до и после, и вселенная запроса разойдётся
+    // с тем, что потом отранжирует правило `words`.
+    let words = term.all_single_words_except_prefix_db(ctx)?;
+    let lemma = term.lemma_derivations(ctx);
+
+    for word in words {
+        if lemma.contains(&word.interned()) {
+            continue;
+        }
+        if let Some(word_docids) = ctx.written_word_docids(None, word.interned())? {
+            docids |= word_docids;
+        }
+    }
+    for phrase in term.all_phrases(ctx)? {
+        docids |= ctx.get_phrase_docids(phrase)?;
+    }
+
+    if let Some(prefix) = term.use_prefix_db(ctx) {
+        if let Some(prefix_docids) = ctx.word_prefix_docids(None, prefix)? {
+            docids |= prefix_docids;
+        }
+    }
+
+    Ok(docids)
+}
+
 pub fn compute_query_term_subset_docids_within_field_id(
     ctx: &mut SearchContext<'_>,
     universe: Option<&RoaringBitmap>,

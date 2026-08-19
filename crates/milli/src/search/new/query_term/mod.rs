@@ -51,6 +51,12 @@ pub struct QueryTerm {
     /// окрестностью того, что набрал пользователь. Префикса у леммы нет: её
     /// никто не дописывает.
     lemma: Option<(Interned<String>, u8)>,
+    /// Слова, которые в терм принесла лемма и которых набранная форма не дала:
+    /// сама лемма и её окрестность по опечаткам.
+    ///
+    /// Нужны там, где терм надо взвесить так, как его взвесил бы поиск без
+    /// словаря, — см. `compute_query_term_subset_written_docids`.
+    lemma_derivations: BTreeSet<Interned<String>>,
     ngram_words: Option<Vec<Interned<String>>>,
     max_levenshtein_distance: u8,
     is_prefix: bool,
@@ -336,6 +342,11 @@ impl QueryTermSubset {
         Ok(result)
     }
 
+    /// Слова, которые в терм принесла лемма, а не набранная форма.
+    pub fn lemma_derivations(&self, ctx: &SearchContext<'_>) -> BTreeSet<Interned<String>> {
+        ctx.term_interner.get(self.original).lemma_derivations.clone()
+    }
+
     pub fn original_phrase(&self, ctx: &SearchContext<'_>) -> Option<Interned<Phrase>> {
         let t = ctx.term_interner.get(self.original);
         if let Some(p) = t.zero_typo.phrase {
@@ -437,6 +448,19 @@ impl TwoTypoTerm {
 }
 
 impl QueryTerm {
+    /// Слова, которыми терм ищется без единой опечатки: набранное и всё, чему
+    /// оно приходится префиксом. Лемма тоже лежит здесь, но она в этот список
+    /// не идёт: он нужен ровно затем, чтобы отделить её от остальных.
+    fn zero_typo_words(&self) -> BTreeSet<Interned<String>> {
+        let mut words: BTreeSet<_> = self.zero_typo.prefix_of.clone();
+        words.extend(self.zero_typo.exact);
+        words.extend(self.zero_typo.use_prefix_db);
+        if let Some((lemma, _)) = self.lemma {
+            words.remove(&lemma);
+        }
+        words
+    }
+
     fn is_empty(&self) -> bool {
         let Lazy::Init(one_typo) = &self.one_typo else {
             return false;
