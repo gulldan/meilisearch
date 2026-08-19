@@ -294,8 +294,12 @@ pub fn partially_initialized_term_from_lemma(
     Ok(term)
 }
 
-fn find_split_words(ctx: &mut SearchContext<'_>, word: &str) -> Result<Option<Interned<Phrase>>> {
-    if let Some((l, r)) = split_best_frequency(ctx, word)? {
+fn find_split_words(
+    ctx: &mut SearchContext<'_>,
+    word: &str,
+    lemma: Option<Interned<String>>,
+) -> Result<Option<Interned<Phrase>>> {
+    if let Some((l, r)) = split_best_frequency(ctx, word, lemma)? {
         Ok(Some(ctx.phrase_interner.insert(Phrase { words: vec![Some(l), Some(r)] })))
     } else {
         Ok(None)
@@ -337,7 +341,7 @@ impl Interned<QueryTerm> {
 
         let split_words = if allows_split_words {
             let original_str = ctx.word_interner.get(original).to_owned();
-            find_split_words(ctx, original_str.as_str())?
+            find_split_words(ctx, original_str.as_str(), lemma.map(|(lemma, _)| lemma))?
         } else {
             None
         };
@@ -410,7 +414,8 @@ impl Interned<QueryTerm> {
             _ => (),
         }
 
-        let split_words = find_split_words(ctx, original_str.as_str())?;
+        let split_words =
+            find_split_words(ctx, original_str.as_str(), lemma.map(|(lemma, _)| lemma))?;
         let self_mut = ctx.term_interner.get_mut(self);
 
         let one_typo = OneTypoTerm { one_typo: one_typo_words, split_words };
@@ -428,9 +433,15 @@ impl Interned<QueryTerm> {
 /// most next to each other in the index.
 ///
 /// Return `None` if the original word cannot be split.
+///
+/// Собственная лемма слова левой половиной быть не может. Словарь положил её в
+/// индекс на место написанного слова, оттого у неё и нашлась пара с соседом, —
+/// но в тексте это одно слово: «чиновники» не разбивается на «чиновник» и «и»
+/// только потому, что за «чиновниками» стоит «и».
 fn split_best_frequency(
     ctx: &mut SearchContext<'_>,
     original: &str,
+    lemma: Option<Interned<String>>,
 ) -> Result<Option<(Interned<String>, Interned<String>)>> {
     let chars = original.char_indices().skip(1);
     let mut best = None;
@@ -438,6 +449,9 @@ fn split_best_frequency(
     for (i, _) in chars {
         let (left, right) = original.split_at(i);
         let left = ctx.word_interner.insert(left.to_owned());
+        if Some(left) == lemma {
+            continue;
+        }
         let right = ctx.word_interner.insert(right.to_owned());
 
         if let Some(frequency) = ctx.get_db_word_pair_proximity_docids_len(None, left, right, 1)? {
