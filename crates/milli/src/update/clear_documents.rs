@@ -66,8 +66,16 @@ impl<'t, 'i> ClearDocuments<'t, 'i> {
         self.index.put_words_prefixes_fst(self.wtxn, &fst::Set::default())?;
         self.index.put_documents_ids(self.wtxn, &empty_roaring)?;
         self.index.put_field_distribution(self.wtxn, &FieldDistribution::default())?;
-        // Ни одного слова не осталось — значит, и ни одного словаря за ними.
-        self.index.stamp_lemmatizer_generations(self.wtxn, &BTreeSet::new())?;
+        // Ни одного слова не осталось — значит, и ни одного словаря за ними,
+        // и ни одной чужой раскладки.
+        self.index.stamp_word_layer(
+            self.wtxn,
+            &BTreeSet::new(),
+            crate::lemmatizer::WordLayerRun {
+                filled_before: false,
+                retokenized_everything: false,
+            },
+        )?;
         self.index.delete_geo_rtree(self.wtxn)?;
         self.index.delete_geo_faceted_documents_ids(self.wtxn)?;
 

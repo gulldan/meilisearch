@@ -530,12 +530,7 @@ impl WordDocidsExtractors {
         let new_dictionary_vec: Vec<_>;
         let new_separators_vec: Vec<_>;
         let new_tokenizer;
-        let tokenizers = if old_stop_words.as_ref().map(|f| f.as_fst().as_bytes())
-            == new_stop_words.as_ref().map(|f| f.as_fst().as_bytes())
-            && old_dictionary == new_dictionary
-            && old_allowed_separators == new_allowed_separators
-            && old_localized_attributes_rules == new_localized_attributes_rules
-        {
+        let tokenizers = if !settings_delta.retokenizes_documents() {
             OneOrTwoTokenizers::OneTokenizer(old_document_tokenizer)
         } else {
             // new tokenizer

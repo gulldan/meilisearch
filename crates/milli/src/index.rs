@@ -26,7 +26,7 @@ use crate::heed_codec::facet::{
 };
 use crate::heed_codec::version::VersionCodec;
 use crate::heed_codec::{BEU16StrCodec, FstSetCodec, StrBEU16Codec, StrRefCodec, SynonymsKeyCodec};
-use crate::lemmatizer::Generations;
+use crate::lemmatizer::{Stamp, WordLayerRun};
 use crate::order_by_map::OrderByMap;
 use crate::progress::Progress;
 use crate::prompt::PromptData;
@@ -92,11 +92,14 @@ pub mod main_key {
     pub const DISABLED_TYPOS_TERMS: &str = "disabled_typos_terms";
     pub const CHAT: &str = "chat";
     pub const VECTOR_STORE_BACKEND: &str = "vector_store_backend";
-    /// Штамп прежнего вида: поколения всего загруженного бандла. Больше не
-    /// читается и стирается при первой же записи нового.
+    /// Штамп самого первого вида: поколения всего загруженного бандла. Больше
+    /// не читается и стирается при первой же записи нынешнего.
     pub const LEMMATIZER_GENERATIONS: &str = "lemmatizer_generations";
-    /// Поколения словарей ровно тех языков, которыми индекс лемматизировали.
+    /// Штамп прошлой сборки: по одному поколению на язык и ни слова о
+    /// раскладке. Читается ради совместимости, переписывается в нынешний.
     pub const LEMMATIZER_DICTIONARIES: &str = "lemmatizer_dictionaries";
+    /// Чем уложен словарный слой индекса: раскладки и поколения словарей.
+    pub const LEMMATIZER_STAMP: &str = "lemmatizer_stamp";
 }
 
 pub mod db_name {
@@ -1836,62 +1839,83 @@ impl Index {
         self.main.remap_key_type::<Str>().delete(txn, main_key::LOCALIZED_ATTRIBUTES_RULES)
     }
 
-    /// The lemmatizer dictionaries the words of this index were produced by.
+    /// Чем уложен словарный слой этого индекса.
     ///
-    /// `None` for an index last written before they were recorded: unknown, not
-    /// empty. An index filled without dictionaries records the empty set.
+    /// `None` for an index last written before it was recorded: unknown, not
+    /// empty. An index filled without dictionaries records an empty stamp.
     ///
-    /// Штамп прежнего вида здесь не виден: он перечислял весь бандл, а не
-    /// языки индекса, и отвечать за индекс не может. Такая база молчит, пока
-    /// её не перестроят, — ровно как база, записанная до штампов вообще.
-    pub fn lemmatizer_generations(&self, rtxn: &RoTxn<'_>) -> heed::Result<Option<Generations>> {
-        self.main
-            .remap_types::<Str, SerdeJson<Generations>>()
-            .get(rtxn, main_key::LEMMATIZER_DICTIONARIES)
+    /// Штамп прошлой сборки читается на месте нынешнего: поколения он называл
+    /// верно, а о раскладке молчал — молчание так и попадает в ответ. Штамп
+    /// самого первого вида здесь не виден: он перечислял весь бандл, а не
+    /// языки индекса, и отвечать за индекс не может. Такая база читается как
+    /// «не записано» — ровно как база, записанная до штампов вообще.
+    pub fn lemmatizer_stamp(&self, rtxn: &RoTxn<'_>) -> heed::Result<Option<Stamp>> {
+        let stamps = self.main.remap_types::<Str, SerdeJson<Stamp>>();
+        match stamps.get(rtxn, main_key::LEMMATIZER_STAMP)? {
+            Some(stamp) => Ok(Some(stamp)),
+            None => stamps.get(rtxn, main_key::LEMMATIZER_DICTIONARIES),
+        }
     }
 
     /// Отмечает индекс словарями, которыми только что лемматизировали.
     ///
-    /// `applied` — языки, чьи словари в этом прогоне применились; их поколения
-    /// записываются заново. Об остальных прогон ничего не узнал: слова, что
-    /// уложили прежние словари, лежат как лежали, и записи о них переживают
-    /// прогон. Отсюда и главное свойство: прогон, не тронувший ни одного слова
-    /// — повторная заливка тех же документов, — не трогает и штамп.
+    /// `applied` — языки, чьи словари в этом прогоне применились. Они
+    /// добавляются к штампу, а не заменяют его: слово, уложенное прежним
+    /// бандлом, от дозаливки соседнего документа никуда не девается, и
+    /// объявлять индекс собранным нынешним бандлом не за что. Отсюда и второе
+    /// свойство: прогон, не тронувший ни одного слова — повторная заливка тех
+    /// же документов, пустой батч, — не трогает и штамп.
     ///
-    /// Пустому индексу переживать нечему: слова, старше этого прогона, в нём
-    /// не осталось ни одного, и штамп сводится к увиденному.
-    pub(crate) fn stamp_lemmatizer_generations(
+    /// Индекс, который был непуст до прогона и штампа не носил, получает
+    /// [`Stamp::unrecorded`]: его слова уложило что-то, о чём в базе не
+    /// записано ничего, и прогон, дописавший к ним свои, этого не отменяет.
+    ///
+    /// Пустому индексу переживать нечего: слов старше этого прогона в нём не
+    /// осталось ни одного, и штамп сводится к увиденному. Очистка документов —
+    /// единственный способ снять из словарных баз слова, уложенные другим
+    /// бандлом, и единственный способ очистить память о них.
+    pub(crate) fn stamp_word_layer(
         &self,
         wtxn: &mut RwTxn<'_>,
         applied: &BTreeSet<Language>,
+        run: WordLayerRun,
     ) -> Result<()> {
-        let known = self.lemmatizer_generations(wtxn)?;
-        let mut stamp = match known {
-            Some(known) if !self.documents_ids(wtxn)?.is_empty() => known,
-            _ => Generations::new(),
+        let mut stamp = if !run.filled_before || self.documents_ids(wtxn)?.is_empty() {
+            Stamp::default()
+        } else {
+            self.lemmatizer_stamp(wtxn)?.unwrap_or_else(Stamp::unrecorded)
         };
-        stamp.extend(crate::lemmatizer::generations_of(applied));
-        self.main.remap_types::<Str, SerdeJson<Generations>>().put(
+        if run.retokenized_everything {
+            // Каждый документ разобран заново — значит, нынешние формы всех
+            // его слов в индексе есть, и вопрос о раскладке закрыт. Поколения
+            // это не отменяет: чужие слова разбор документов не удаляет.
+            stamp.layouts.clear();
+        }
+        stamp.extend_with(applied);
+        self.main.remap_types::<Str, SerdeJson<Stamp>>().put(
             wtxn,
-            main_key::LEMMATIZER_DICTIONARIES,
+            main_key::LEMMATIZER_STAMP,
             &stamp,
         )?;
-        // Четыре килобайта на индекс, из которых к индексу относилась горстка
-        // строк: сносим, как только есть чем заменить.
+        // Прежние штампы больше не читаются: первый занимал четыре килобайта,
+        // из которых к индексу относилась горстка строк, второй не называл
+        // раскладки. Сносим, как только есть чем заменить.
         self.main.remap_key_type::<Str>().delete(wtxn, main_key::LEMMATIZER_GENERATIONS)?;
+        self.main.remap_key_type::<Str>().delete(wtxn, main_key::LEMMATIZER_DICTIONARIES)?;
         Ok(())
     }
 
-    /// Warns once per process when this index was filled by dictionaries other
-    /// than the loaded ones. Searching it is never refused: a swapped bundle is
-    /// worth shouting about, not worth taking an index offline for.
+    /// Warns once per process when this index holds words this build would not
+    /// have laid down. Searching it is never refused: a swapped bundle or a
+    /// changed layout is worth shouting about, not worth taking an index
+    /// offline for.
     ///
     /// `uuid` — то, что лежит под именем: после `swap-indexes` имя прежнее, а
     /// индекс под ним другой, и проверять его надо заново.
-    pub fn check_lemmatizer_generations(&self, uid: &str, uuid: uuid::Uuid) -> Result<()> {
+    pub fn check_word_layer(&self, uid: &str, uuid: uuid::Uuid) -> Result<()> {
         crate::lemmatizer::check_index(uid, uuid, || {
             let rtxn = self.read_txn()?;
-            Ok(self.lemmatizer_generations(&rtxn)?)
+            Ok((self.lemmatizer_stamp(&rtxn)?, self.number_of_documents(&rtxn)?))
         })
     }
 

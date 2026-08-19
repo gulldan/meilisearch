@@ -2663,6 +2663,24 @@ pub trait SettingsDelta {
     fn old_localized_attributes_rules(&self) -> &[LocalizedAttributesRule];
     fn new_localized_attributes_rules(&self) -> &[LocalizedAttributesRule];
 
+    /// Меняются ли настройки, по которым документ разбирается на слова.
+    ///
+    /// Меняются — и каждый документ индекса разбирается заново, обоими
+    /// наборами настроек: старым, чтобы снять то, что он дал, и новым, чтобы
+    /// положить то, что даёт он. Не меняются — словарного слоя переиндексация
+    /// не касается вовсе, и документы она пропускает.
+    ///
+    /// Один и тот же вопрос задают извлекатели слов и словесных пар, решая,
+    /// строить ли второй токенизатор, и штамп словарного слоя, решая, ручается
+    /// ли прогон за то, что нынешние формы всех слов индекса в нём есть.
+    fn retokenizes_documents(&self) -> bool {
+        self.old_stop_words().as_ref().map(|words| words.as_fst().as_bytes())
+            != self.new_stop_words().as_ref().map(|words| words.as_fst().as_bytes())
+            || self.old_dictionary() != self.new_dictionary()
+            || self.old_allowed_separators() != self.new_allowed_separators()
+            || self.old_localized_attributes_rules() != self.new_localized_attributes_rules()
+    }
+
     fn old_filterable_rules(&self) -> &[FilterableAttributesRule];
     fn new_filterable_rules(&self) -> &[FilterableAttributesRule];
 
