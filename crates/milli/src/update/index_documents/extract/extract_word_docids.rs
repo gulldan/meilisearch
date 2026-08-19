@@ -23,14 +23,16 @@ use crate::{DocumentId, FieldId, Result};
 /// Returns a grenad reader with the list of extracted words and
 /// documents ids from the given chunk of docid word positions.
 ///
-/// The first returned reader is the one for normal word_docids, and the second one is for
-/// exact_word_docids
+/// The first returned reader is the one for normal word_docids, the second one is for
+/// exact_word_docids, the third one for word_fid_docids and the last one for
+/// written_word_docids.
 #[tracing::instrument(level = "trace", skip_all, target = "indexing::extract")]
 pub fn extract_word_docids<R: io::Read + io::Seek>(
     docid_word_positions: grenad::Reader<R>,
     indexer: GrenadParameters,
     settings_diff: &InnerIndexSettingsDiff,
 ) -> Result<(
+    grenad::Reader<BufReader<File>>,
     grenad::Reader<BufReader<File>>,
     grenad::Reader<BufReader<File>>,
     grenad::Reader<BufReader<File>>,
@@ -43,12 +45,25 @@ pub fn extract_word_docids<R: io::Read + io::Seek>(
         indexer.chunk_compression_type,
         indexer.chunk_compression_level,
         indexer.max_nb_chunks,
-        max_memory.map(|m| m / 3),
+        max_memory.map(|m| m / 4),
+        true,
+    );
+    // Написанные формы идут своей базой: по ней правило exactness отличает
+    // документ со словом от документа, до которого дотянулась лемма.
+    let mut written_word_docids_sorter = create_sorter(
+        grenad::SortAlgorithm::Unstable,
+        MergeDeladdCboRoaringBitmaps,
+        indexer.chunk_compression_type,
+        indexer.chunk_compression_level,
+        indexer.max_nb_chunks,
+        max_memory.map(|m| m / 4),
         true,
     );
     let mut key_buffer = Vec::new();
     let mut del_words = BTreeSet::new();
     let mut add_words = BTreeSet::new();
+    let mut del_written = BTreeSet::new();
+    let mut add_written = BTreeSet::new();
     let mut cursor = docid_word_positions.into_cursor()?;
     while let Some((key, value)) = cursor.move_on_next()? {
         let (document_id_bytes, fid_bytes) = try_split_array_at(key)
@@ -63,6 +78,8 @@ pub fn extract_word_docids<R: io::Read + io::Seek>(
         if let Some(deletion) = del_add_reader.get(DelAdd::Deletion) {
             for (_pos, forms) in KvReaderU16::from_slice(deletion).iter() {
                 del_words.extend(word_forms(forms).map(<[u8]>::to_vec));
+                // Первая форма — та, что написана в документе.
+                del_written.extend(word_forms(forms).next().map(<[u8]>::to_vec));
             }
         }
 
@@ -70,6 +87,7 @@ pub fn extract_word_docids<R: io::Read + io::Seek>(
         if let Some(addition) = del_add_reader.get(DelAdd::Addition) {
             for (_pos, forms) in KvReaderU16::from_slice(addition).iter() {
                 add_words.extend(word_forms(forms).map(<[u8]>::to_vec));
+                add_written.extend(word_forms(forms).next().map(<[u8]>::to_vec));
             }
         }
 
@@ -81,9 +99,17 @@ pub fn extract_word_docids<R: io::Read + io::Seek>(
             &add_words,
             &mut word_fid_docids_sorter,
         )?;
+        written_words_into_sorter(
+            document_id,
+            &del_written,
+            &add_written,
+            &mut written_word_docids_sorter,
+        )?;
 
         del_words.clear();
         add_words.clear();
+        del_written.clear();
+        add_written.clear();
     }
 
     let mut word_fid_docids_writer = create_writer(
@@ -98,7 +124,7 @@ pub fn extract_word_docids<R: io::Read + io::Seek>(
         indexer.chunk_compression_type,
         indexer.chunk_compression_level,
         indexer.max_nb_chunks,
-        max_memory.map(|m| m / 3),
+        max_memory.map(|m| m / 4),
         true,
     );
 
@@ -108,7 +134,7 @@ pub fn extract_word_docids<R: io::Read + io::Seek>(
         indexer.chunk_compression_type,
         indexer.chunk_compression_level,
         indexer.max_nb_chunks,
-        max_memory.map(|m| m / 3),
+        max_memory.map(|m| m / 4),
         true,
     );
 
@@ -157,7 +183,47 @@ pub fn extract_word_docids<R: io::Read + io::Seek>(
         sorter_into_reader(word_docids_sorter, indexer)?,
         sorter_into_reader(exact_word_docids_sorter, indexer)?,
         writer_into_reader(word_fid_docids_writer)?,
+        sorter_into_reader(written_word_docids_sorter, indexer)?,
     ))
+}
+
+/// Кладёт написанные формы документа в свой сортировщик — ключ одно слово,
+/// без поля: база написанных форм отвечает на вопрос «есть ли слово в
+/// документе буквально», а не «в каком оно поле».
+#[tracing::instrument(level = "trace", skip_all, target = "indexing::extract")]
+fn written_words_into_sorter(
+    document_id: DocumentId,
+    del_words: &BTreeSet<Vec<u8>>,
+    add_words: &BTreeSet<Vec<u8>>,
+    written_word_docids_sorter: &mut grenad::Sorter<MergeDeladdCboRoaringBitmaps>,
+) -> Result<()> {
+    use itertools::merge_join_by;
+    use itertools::EitherOrBoth::{Both, Left, Right};
+
+    let mut buffer = Vec::new();
+    for eob in merge_join_by(del_words.iter(), add_words.iter(), |d, a| d.cmp(a)) {
+        buffer.clear();
+        let mut value_writer = KvWriterDelAdd::new(&mut buffer);
+        let word_bytes = match eob {
+            Left(word_bytes) => {
+                value_writer.insert(DelAdd::Deletion, document_id.to_ne_bytes()).unwrap();
+                word_bytes
+            }
+            Right(word_bytes) => {
+                value_writer.insert(DelAdd::Addition, document_id.to_ne_bytes()).unwrap();
+                word_bytes
+            }
+            Both(word_bytes, _) => {
+                value_writer.insert(DelAdd::Deletion, document_id.to_ne_bytes()).unwrap();
+                value_writer.insert(DelAdd::Addition, document_id.to_ne_bytes()).unwrap();
+                word_bytes
+            }
+        };
+
+        written_word_docids_sorter.insert(word_bytes, value_writer.into_inner().unwrap())?;
+    }
+
+    Ok(())
 }
 
 #[tracing::instrument(level = "trace", skip_all, target = "indexing::extract")]

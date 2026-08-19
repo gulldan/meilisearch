@@ -487,6 +487,7 @@ pub enum Database {
     ExactWordDocids,
     FidWordCountDocids,
     WordDocids,
+    WrittenWordDocids,
     WordFidDocids,
     WordPairProximityDocids,
     WordPositionDocids,
@@ -508,6 +509,7 @@ impl Database {
             Database::ExternalDocumentsIds => index.external_documents_ids.remap_types(),
             Database::ExactWordDocids => index.exact_word_docids.remap_types(),
             Database::WordDocids => index.word_docids.remap_types(),
+            Database::WrittenWordDocids => index.written_word_docids.remap_types(),
             Database::WordFidDocids => index.word_fid_docids.remap_types(),
             Database::WordPositionDocids => index.word_position_docids.remap_types(),
             Database::FidWordCountDocids => index.field_id_word_count_docids.remap_types(),
@@ -530,6 +532,7 @@ impl Database {
             Database::ExternalDocumentsIds => db_name::EXTERNAL_DOCUMENTS_IDS,
             Database::ExactWordDocids => db_name::EXACT_WORD_DOCIDS,
             Database::WordDocids => db_name::WORD_DOCIDS,
+            Database::WrittenWordDocids => db_name::WRITTEN_WORD_DOCIDS,
             Database::WordFidDocids => db_name::WORD_FIELD_ID_DOCIDS,
             Database::WordPositionDocids => db_name::WORD_POSITION_DOCIDS,
             Database::FidWordCountDocids => db_name::FIELD_ID_WORD_COUNT_DOCIDS,
@@ -931,6 +934,7 @@ where
 pub enum ExactWordDocids {}
 pub enum FidWordCountDocids {}
 pub enum WordDocids {}
+pub enum WrittenWordDocids {}
 pub enum WordFidDocids {}
 pub enum WordPairProximityDocids {}
 pub enum WordPositionDocids {}
@@ -949,6 +953,10 @@ impl DatabaseType for FidWordCountDocids {
 
 impl DatabaseType for WordDocids {
     const DATABASE: Database = Database::WordDocids;
+}
+
+impl DatabaseType for WrittenWordDocids {
+    const DATABASE: Database = Database::WrittenWordDocids;
 }
 
 impl DatabaseType for WordFidDocids {

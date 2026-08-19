@@ -179,6 +179,10 @@ impl State {
                     .get_db_word_position_docids(Some(universe), *word, bucketed_position)?
                     .unwrap_or_default();
                 candidates &= word_position_docids;
+                // Позиции знают и о лемме: она лежит на позиции своего слова.
+                // Поэтому поле, совпавшее с запросом целиком, ещё и проверяется
+                // на то, что слова в нём написаны, а не выведены словарём.
+                candidates &= ctx.written_word_docids(Some(universe), *word)?.unwrap_or_default();
                 if candidates.is_empty() {
                     return Ok(State::Empty(query_graph.clone()));
                 }

@@ -31,6 +31,7 @@ impl<'t, 'i> ClearDocuments<'t, 'i> {
             external_documents_ids,
             word_docids,
             exact_word_docids,
+            written_word_docids,
             synonyms: _,
             word_prefix_docids,
             exact_word_prefix_docids,
@@ -81,6 +82,7 @@ impl<'t, 'i> ClearDocuments<'t, 'i> {
         external_documents_ids.clear(self.wtxn)?;
         word_docids.clear(self.wtxn)?;
         exact_word_docids.clear(self.wtxn)?;
+        written_word_docids.clear(self.wtxn)?;
         word_prefix_docids.clear(self.wtxn)?;
         exact_word_prefix_docids.clear(self.wtxn)?;
         word_pair_proximity_docids.clear(self.wtxn)?;

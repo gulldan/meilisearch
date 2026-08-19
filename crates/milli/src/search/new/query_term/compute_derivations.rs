@@ -277,14 +277,12 @@ pub fn partially_initialized_term_from_lemma(
     // отдельно и считаются лениво, вместе с опечатками поверхностной формы.
     let from_lemma = partially_initialized_term_from_word(ctx, tokenizer, lemma, 0, false, false)?;
 
-    match (term.zero_typo.exact, from_lemma.zero_typo.exact) {
-        // Поверхностной формы в индексе нет — тогда точное совпадение это
-        // лемма, иначе правило exactness перестало бы видеть словарный поиск.
-        (None, exact @ Some(_)) => term.zero_typo.exact = exact,
-        (Some(_), Some(lemma_word)) => {
-            term.zero_typo.prefix_of.insert(lemma_word);
-        }
-        _ => (),
+    // Лемма ищется наравне с набранным словом, но точным совпадением не
+    // становится: точное совпадение — это то, что человек написал, а лемму
+    // приписал словарь. Она ложится туда же, куда ложатся слова, для которых
+    // набранное — префикс: словом без опечаток, мимо `exact`.
+    if let Some(lemma_word) = from_lemma.zero_typo.exact {
+        term.zero_typo.prefix_of.insert(lemma_word);
     }
     term.zero_typo.synonyms.extend(from_lemma.zero_typo.synonyms);
     // Больше опечаток, чем отмерено самому терму, лемме не дать: стоимости

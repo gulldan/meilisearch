@@ -32,6 +32,7 @@ pub struct WordDocidsBalancedCaches<'extractor> {
     word_fid_docids: BalancedCaches<'extractor>,
     word_docids: BalancedCaches<'extractor>,
     exact_word_docids: BalancedCaches<'extractor>,
+    written_word_docids: BalancedCaches<'extractor>,
     word_position_docids: BalancedCaches<'extractor>,
     fid_word_count_docids: BalancedCaches<'extractor>,
     fid_word_count: HashMap<FieldId, (Option<usize>, Option<usize>)>,
@@ -55,6 +56,7 @@ impl<'extractor> WordDocidsBalancedCaches<'extractor> {
             word_fid_docids: BalancedCaches::new_in(buckets, max_memory, alloc),
             word_docids: BalancedCaches::new_in(buckets, max_memory, alloc),
             exact_word_docids: BalancedCaches::new_in(buckets, max_memory, alloc),
+            written_word_docids: BalancedCaches::new_in(buckets, max_memory, alloc),
             word_position_docids: BalancedCaches::new_in(buckets, max_memory, alloc),
             fid_word_count_docids: BalancedCaches::new_in(buckets, max_memory, alloc),
             fid_word_count: HashMap::new(),
@@ -77,6 +79,11 @@ impl<'extractor> WordDocidsBalancedCaches<'extractor> {
         let longest = word.len().max(lemma.map_or(0, |(lemma, _)| lemma.len()));
         let mut buffer = BumpVec::with_capacity_in(longest + 1 + size_of::<FieldId>(), bump);
         let position = bucketed_position(position);
+
+        // Написанное слово помечается написанным: только по этой базе правило
+        // exactness отличает документ, где слово стоит буквально, от документа,
+        // до которого дотянулась лемма.
+        self.written_word_docids.insert_add_u32(word.as_bytes(), docid)?;
 
         // Лемма ложится теми же ключами и на ту же позицию, что и набранное
         // слово: для баз это просто ещё одно слово документа.
@@ -135,6 +142,11 @@ impl<'extractor> WordDocidsBalancedCaches<'extractor> {
         let longest = word.len().max(lemma.map_or(0, |(lemma, _)| lemma.len()));
         let mut buffer = BumpVec::with_capacity_in(longest + 1 + size_of::<FieldId>(), bump);
         let position = bucketed_position(position);
+
+        // Написанное слово помечается написанным: только по этой базе правило
+        // exactness отличает документ, где слово стоит буквально, от документа,
+        // до которого дотянулась лемма.
+        self.written_word_docids.insert_del_u32(word.as_bytes(), docid)?;
 
         // Лемма ложится теми же ключами и на ту же позицию, что и набранное
         // слово: для баз это просто ещё одно слово документа.
@@ -210,6 +222,7 @@ pub struct WordDocidsCaches<'extractor> {
     pub word_docids: Vec<BalancedCaches<'extractor>>,
     pub word_fid_docids: Vec<BalancedCaches<'extractor>>,
     pub exact_word_docids: Vec<BalancedCaches<'extractor>>,
+    pub written_word_docids: Vec<BalancedCaches<'extractor>>,
     pub word_position_docids: Vec<BalancedCaches<'extractor>>,
     pub fid_word_count_docids: Vec<BalancedCaches<'extractor>>,
 }
@@ -220,6 +233,7 @@ impl<'extractor> WordDocidsCaches<'extractor> {
             word_docids: Vec::new(),
             word_fid_docids: Vec::new(),
             exact_word_docids: Vec::new(),
+            written_word_docids: Vec::new(),
             word_position_docids: Vec::new(),
             fid_word_count_docids: Vec::new(),
         }
@@ -230,6 +244,7 @@ impl<'extractor> WordDocidsCaches<'extractor> {
             word_docids,
             word_fid_docids,
             exact_word_docids,
+            written_word_docids,
             word_position_docids,
             fid_word_count_docids,
             fid_word_count: _,
@@ -239,6 +254,7 @@ impl<'extractor> WordDocidsCaches<'extractor> {
         self.word_docids.push(word_docids);
         self.word_fid_docids.push(word_fid_docids);
         self.exact_word_docids.push(exact_word_docids);
+        self.written_word_docids.push(written_word_docids);
         self.word_position_docids.push(word_position_docids);
         self.fid_word_count_docids.push(fid_word_count_docids);
 

@@ -408,6 +408,7 @@ where
                                     word_docids_reader,
                                     exact_word_docids_reader,
                                     word_fid_docids_reader,
+                                    written_word_docids_reader,
                                 } => {
                                     let cloneable_chunk =
                                         unsafe { as_cloneable_grenad(&word_docids_reader)? };
@@ -434,6 +435,7 @@ where
                                         word_docids_reader,
                                         exact_word_docids_reader,
                                         word_fid_docids_reader,
+                                        written_word_docids_reader,
                                     }
                                 }
                                 TypedChunk::WordPositionDocids(chunk) => {

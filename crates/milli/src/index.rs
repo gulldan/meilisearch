@@ -102,6 +102,7 @@ pub mod main_key {
 pub mod db_name {
     pub const MAIN: &str = "main";
     pub const WORD_DOCIDS: &str = "word-docids";
+    pub const WRITTEN_WORD_DOCIDS: &str = "written-word-docids";
     pub const EXACT_WORD_DOCIDS: &str = "exact-word-docids";
     pub const SYNONYMS: &str = "synonyms";
     pub const WORD_PREFIX_DOCIDS: &str = "word-prefix-docids";
@@ -129,7 +130,7 @@ pub mod db_name {
     pub const CELLULITE: &str = "cellulite"; // used as a prefix, counted as `Cellulite::nb_dbs`
     pub const DOCUMENTS: &str = "documents";
 }
-const NUMBER_OF_DBS: u32 = 27 + Cellulite::nb_dbs();
+const NUMBER_OF_DBS: u32 = 28 + Cellulite::nb_dbs();
 
 #[derive(Clone)]
 pub struct Index {
@@ -147,6 +148,15 @@ pub struct Index {
 
     /// A word and all the documents ids containing the word, from attributes for which typos are not allowed.
     pub exact_word_docids: Database<Str, CboRoaringBitmapCodec>,
+
+    /// Слово и документы, где оно написано именно так.
+    ///
+    /// [`Index::word_docids`] при двойной индексации отвечает и за лемму: документ
+    /// попадает туда и тогда, когда самого слова в нём нет, а есть другая форма
+    /// того же слова. Точное совпадение так не отмерить, поэтому написанное лежит
+    /// ещё и отдельно. Без словарей это в точности объединение
+    /// [`Index::word_docids`] и [`Index::exact_word_docids`].
+    pub written_word_docids: Database<Str, CboRoaringBitmapCodec>,
 
     /// A list of words and the list of synonyms associated to it.
     pub synonyms: heed::Database<SynonymsKeyCodec<String>, SerdeJson<AssociatedSynonyms>>,
@@ -238,6 +248,7 @@ impl Index {
         let external_documents_ids =
             env.create_database(&mut wtxn, Some(EXTERNAL_DOCUMENTS_IDS))?;
         let exact_word_docids = env.create_database(&mut wtxn, Some(EXACT_WORD_DOCIDS))?;
+        let written_word_docids = env.create_database(&mut wtxn, Some(WRITTEN_WORD_DOCIDS))?;
         let word_prefix_docids = env.create_database(&mut wtxn, Some(WORD_PREFIX_DOCIDS))?;
         let synonyms = env.create_database(&mut wtxn, Some(SYNONYMS))?;
         let exact_word_prefix_docids =
@@ -287,6 +298,7 @@ impl Index {
             external_documents_ids,
             word_docids,
             exact_word_docids,
+            written_word_docids,
             synonyms,
             word_prefix_docids,
             exact_word_prefix_docids,
@@ -1995,6 +2007,7 @@ impl Index {
             external_documents_ids,
             word_docids,
             exact_word_docids,
+            written_word_docids,
             synonyms,
             word_prefix_docids,
             exact_word_prefix_docids,
@@ -2039,6 +2052,7 @@ impl Index {
             .insert("external_documents_ids", external_documents_ids.stat(rtxn).map(compute_size)?);
         sizes.insert("word_docids", word_docids.stat(rtxn).map(compute_size)?);
         sizes.insert("exact_word_docids", exact_word_docids.stat(rtxn).map(compute_size)?);
+        sizes.insert("written_word_docids", written_word_docids.stat(rtxn).map(compute_size)?);
         sizes.insert("synonyms", synonyms.stat(rtxn).map(compute_size)?);
         sizes.insert("word_prefix_docids", word_prefix_docids.stat(rtxn).map(compute_size)?);
         sizes.insert(
