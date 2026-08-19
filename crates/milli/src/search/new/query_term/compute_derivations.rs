@@ -182,6 +182,7 @@ pub fn partially_initialized_term_from_word(
             QueryTerm {
                 original: ctx.word_interner.insert(word.to_owned()),
                 lemma: None,
+                lemma_derivations: BTreeSet::new(),
                 ngram_words: None,
                 is_prefix: false,
                 max_levenshtein_distance: 0,
@@ -245,6 +246,7 @@ pub fn partially_initialized_term_from_word(
     Ok(QueryTerm {
         original: word_interned,
         lemma: None,
+        lemma_derivations: BTreeSet::new(),
         ngram_words: None,
         max_levenshtein_distance: max_typo,
         is_prefix,
@@ -277,14 +279,20 @@ pub fn partially_initialized_term_from_lemma(
     // отдельно и считаются лениво, вместе с опечатками поверхностной формы.
     let from_lemma = partially_initialized_term_from_word(ctx, tokenizer, lemma, 0, false, false)?;
 
-    match (term.zero_typo.exact, from_lemma.zero_typo.exact) {
-        // Поверхностной формы в индексе нет — тогда точное совпадение это
-        // лемма, иначе правило exactness перестало бы видеть словарный поиск.
-        (None, exact @ Some(_)) => term.zero_typo.exact = exact,
-        (Some(_), Some(lemma_word)) => {
-            term.zero_typo.prefix_of.insert(lemma_word);
+    // Лемма ищется наравне с набранным словом, но точным совпадением не
+    // становится: точное совпадение — это то, что человек написал, а лемму
+    // приписал словарь. Она ложится туда же, куда ложатся слова, для которых
+    // набранное — префикс: словом без опечаток, мимо `exact`.
+    if let Some(lemma_word) = from_lemma.zero_typo.exact {
+        // Лемма считается приведённой словарём только тогда, когда набранное
+        // слово не дотянулось бы до неё само: «парнаса» находит «парнас» и без
+        // словаря, одной опечаткой.
+        let derived_from_surface = term.zero_typo.exact == Some(lemma_word)
+            || term.zero_typo.prefix_of.contains(&lemma_word);
+        term.zero_typo.prefix_of.insert(lemma_word);
+        if !derived_from_surface {
+            term.lemma_derivations.insert(lemma_word);
         }
-        _ => (),
     }
     term.zero_typo.synonyms.extend(from_lemma.zero_typo.synonyms);
     // Больше опечаток, чем отмерено самому терму, лемме не дать: стоимости
@@ -311,6 +319,8 @@ impl Interned<QueryTerm> {
         let self_mut = ctx.term_interner.get_mut(self);
 
         let allows_split_words = self_mut.allows_split_words();
+        // Что терм уже нашёл без опечаток — этого лемме не приписать.
+        let zero_typo_words = self_mut.zero_typo_words();
         let QueryTerm {
             original,
             lemma,
@@ -332,12 +342,20 @@ impl Interned<QueryTerm> {
         if *max_nbr_typos > 0 {
             find_one_typo_derivations(ctx, original, is_prefix, &mut one_typo_words)?;
         }
+        // Что набранное слово нашло само, до того как спросили лемму.
+        let from_surface = one_typo_words.clone();
 
         // Окрестность леммы: индекс полон лемм, и расхождение словарей на букву
-        // ловится только отсюда.
+        // ловится только отсюда. Что дала одна лемма, записывается отдельно.
+        let mut lemma_words = BTreeSet::new();
         if let Some((lemma, _)) = lemma.filter(|(_, typos)| *typos > 0) {
-            find_one_typo_derivations(ctx, lemma, false, &mut one_typo_words)?;
+            find_one_typo_derivations(ctx, lemma, false, &mut lemma_words)?;
         }
+        let mut lemma_only = lemma_words.clone();
+        for word in from_surface.iter().chain(zero_typo_words.iter()) {
+            lemma_only.remove(word);
+        }
+        one_typo_words.extend(lemma_words);
 
         let split_words = if allows_split_words {
             let original_str = ctx.word_interner.get(original).to_owned();
@@ -366,11 +384,17 @@ impl Interned<QueryTerm> {
         let one_typo = OneTypoTerm { split_words, one_typo: one_typo_words };
 
         self_mut.one_typo = Lazy::Init(one_typo);
+        self_mut.lemma_derivations.extend(lemma_only);
+        for word in &from_surface {
+            self_mut.lemma_derivations.remove(word);
+        }
 
         Ok(())
     }
     fn initialize_one_and_two_typo_subterm(self, ctx: &mut SearchContext<'_>) -> Result<()> {
         let self_mut = ctx.term_interner.get_mut(self);
+        // Что терм уже нашёл без опечаток — этого лемме не приписать.
+        let zero_typo_words = self_mut.zero_typo_words();
         let QueryTerm {
             original,
             lemma,
@@ -398,21 +422,31 @@ impl Interned<QueryTerm> {
                 &mut two_typo_words,
             )?;
         }
+        // Что набранное слово нашло само, до того как спросили лемму.
+        let from_surface: BTreeSet<_> = one_typo_words.union(&two_typo_words).copied().collect();
 
         // Окрестность леммы: индекс полон лемм, и расхождение словарей на букву
-        // ловится только отсюда.
+        // ловится только отсюда. Что дала одна лемма, записывается отдельно.
+        let mut lemma_one = BTreeSet::new();
+        let mut lemma_two = BTreeSet::new();
         match lemma {
-            Some((lemma, 1)) => find_one_typo_derivations(ctx, lemma, false, &mut one_typo_words)?,
+            Some((lemma, 1)) => find_one_typo_derivations(ctx, lemma, false, &mut lemma_one)?,
             Some((lemma, typos)) if typos > 1 => find_one_two_typo_derivations(
                 lemma,
                 false,
                 ctx.index.words_fst(ctx.txn)?,
                 &mut ctx.word_interner,
-                &mut one_typo_words,
-                &mut two_typo_words,
+                &mut lemma_one,
+                &mut lemma_two,
             )?,
             _ => (),
         }
+        let mut lemma_only: BTreeSet<_> = lemma_one.union(&lemma_two).copied().collect();
+        for word in from_surface.iter().chain(zero_typo_words.iter()) {
+            lemma_only.remove(word);
+        }
+        one_typo_words.extend(lemma_one);
+        two_typo_words.extend(lemma_two);
 
         let split_words =
             find_split_words(ctx, original_str.as_str(), lemma.map(|(lemma, _)| lemma))?;
@@ -424,6 +458,10 @@ impl Interned<QueryTerm> {
 
         self_mut.one_typo = Lazy::Init(one_typo);
         self_mut.two_typo = Lazy::Init(two_typo);
+        self_mut.lemma_derivations.extend(lemma_only);
+        for word in &from_surface {
+            self_mut.lemma_derivations.remove(word);
+        }
 
         Ok(())
     }

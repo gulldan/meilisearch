@@ -301,6 +301,7 @@ make_enum_progress! {
         WordDocids,
         WordFieldIdDocids,
         ExactWordDocids,
+        WrittenWordDocids,
         WordPositionDocids,
         FieldIdWordCountDocids,
     }

@@ -76,6 +76,7 @@ pub(crate) enum TypedChunk {
         word_docids_reader: grenad::Reader<BufReader<File>>,
         exact_word_docids_reader: grenad::Reader<BufReader<File>>,
         word_fid_docids_reader: grenad::Reader<BufReader<File>>,
+        written_word_docids_reader: grenad::Reader<BufReader<File>>,
     },
     WordPositionDocids(grenad::Reader<BufReader<File>>),
     WordPairProximityDocids(grenad::Reader<BufReader<File>>),
@@ -267,12 +268,14 @@ pub(crate) fn write_typed_chunk_into_index(
             let mut word_docids_builder = MergerBuilder::new(MergeDeladdCboRoaringBitmaps);
             let mut exact_word_docids_builder = MergerBuilder::new(MergeDeladdCboRoaringBitmaps);
             let mut word_fid_docids_builder = MergerBuilder::new(MergeDeladdCboRoaringBitmaps);
+            let mut written_word_docids_builder = MergerBuilder::new(MergeDeladdCboRoaringBitmaps);
             let mut fst_merger_builder = MergerBuilder::new(MergeIgnoreValues);
             for typed_chunk in typed_chunks {
                 let TypedChunk::WordDocids {
                     word_docids_reader,
                     exact_word_docids_reader,
                     word_fid_docids_reader,
+                    written_word_docids_reader,
                 } = typed_chunk
                 else {
                     unreachable!();
@@ -282,6 +285,7 @@ pub(crate) fn write_typed_chunk_into_index(
                 word_docids_builder.push(word_docids_reader.into_cursor()?);
                 exact_word_docids_builder.push(exact_word_docids_reader.into_cursor()?);
                 word_fid_docids_builder.push(word_fid_docids_reader.into_cursor()?);
+                written_word_docids_builder.push(written_word_docids_reader.into_cursor()?);
                 fst_merger_builder.push(clonable_word_docids.into_cursor()?);
             }
 
@@ -307,6 +311,15 @@ pub(crate) fn write_typed_chunk_into_index(
             write_entries_into_database(
                 word_fid_docids_merger,
                 &index.word_fid_docids,
+                wtxn,
+                deladd_serialize_add_side,
+                merge_deladd_cbo_roaring_bitmaps_into_cbo_roaring_bitmap,
+            )?;
+
+            let written_word_docids_merger = written_word_docids_builder.build();
+            write_entries_into_database(
+                written_word_docids_merger,
+                &index.written_word_docids,
                 wtxn,
                 deladd_serialize_add_side,
                 merge_deladd_cbo_roaring_bitmaps_into_cbo_roaring_bitmap,

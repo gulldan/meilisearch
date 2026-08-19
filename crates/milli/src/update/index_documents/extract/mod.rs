@@ -106,6 +106,7 @@ pub(crate) fn data_from_obkv_documents(
                                 grenad::Reader<BufReader<File>>,
                                 grenad::Reader<BufReader<File>>,
                                 grenad::Reader<BufReader<File>>,
+                                grenad::Reader<BufReader<File>>,
                             ),
                         >(
                             docid_word_positions_chunk.clone(),
@@ -117,11 +118,13 @@ pub(crate) fn data_from_obkv_documents(
                                 word_docids_reader,
                                 exact_word_docids_reader,
                                 word_fid_docids_reader,
+                                written_word_docids_reader,
                             )| {
                                 TypedChunk::WordDocids {
                                     word_docids_reader,
                                     exact_word_docids_reader,
                                     word_fid_docids_reader,
+                                    written_word_docids_reader,
                                 }
                             },
                         );

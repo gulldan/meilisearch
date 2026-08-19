@@ -124,6 +124,7 @@ where
             word_docids,
             word_fid_docids,
             exact_word_docids,
+            written_word_docids,
             word_position_docids,
             fid_word_count_docids,
         } = {
@@ -191,6 +192,21 @@ where
                 index.exact_word_docids.remap_types(),
                 index,
                 extractor_sender.docids::<ExactWordDocids>(),
+                indexing_context.must_stop_processing,
+            )?;
+        }
+
+        {
+            let span =
+                tracing::trace_span!(target: "indexing::documents::merge", "written_word_docids");
+            let _entered = span.enter();
+            indexing_context.progress.update_progress(MergingWordCache::WrittenWordDocids);
+
+            merge_and_send_docids(
+                written_word_docids,
+                index.written_word_docids.remap_types(),
+                index,
+                extractor_sender.docids::<WrittenWordDocids>(),
                 indexing_context.must_stop_processing,
             )?;
         }
@@ -433,6 +449,7 @@ where
             word_docids,
             word_fid_docids,
             exact_word_docids,
+            written_word_docids,
             word_position_docids,
             fid_word_count_docids,
         } = {
@@ -501,6 +518,21 @@ where
                 index.exact_word_docids.remap_types(),
                 index,
                 extractor_sender.docids::<ExactWordDocids>(),
+                indexing_context.must_stop_processing,
+            )?;
+        }
+
+        {
+            let span =
+                tracing::trace_span!(target: "indexing::documents::merge", "written_word_docids");
+            let _entered = span.enter();
+            indexing_context.progress.update_progress(MergingWordCache::WrittenWordDocids);
+
+            merge_and_send_docids(
+                written_word_docids,
+                index.written_word_docids.remap_types(),
+                index,
+                extractor_sender.docids::<WrittenWordDocids>(),
                 indexing_context.must_stop_processing,
             )?;
         }

@@ -30,8 +30,16 @@ fn compute_docids(
     let candidates = match exact_term {
         // TODO I move the intersection here
         ExactTerm::Phrase(phrase) => ctx.get_phrase_docids(phrase)? & universe,
+        // Точное совпадение — это слово, написанное так, как его набрали. Слово
+        // из индекса, до которого дотянулась лемма, точным совпадением не
+        // считается, поэтому найденное пересекается с написанными формами.
         ExactTerm::Word(word) => {
-            ctx.word_docids(Some(universe), Word::Original(word))?.unwrap_or_default()
+            let candidates =
+                ctx.word_docids(Some(universe), Word::Original(word))?.unwrap_or_default();
+            match ctx.written_word_docids(Some(&candidates), word)? {
+                Some(written) => written,
+                None => RoaringBitmap::new(),
+            }
         }
     };
 

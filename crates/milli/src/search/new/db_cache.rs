@@ -32,6 +32,7 @@ pub struct DatabaseCache<'ctx> {
         FxHashMap<(u8, Interned<String>, Interned<String>), Option<Cow<'ctx, [u8]>>>,
     pub word_docids: FxHashMap<Interned<String>, Option<Cow<'ctx, [u8]>>>,
     pub exact_word_docids: FxHashMap<Interned<String>, Option<Cow<'ctx, [u8]>>>,
+    pub written_word_docids: FxHashMap<Interned<String>, Option<Cow<'ctx, [u8]>>>,
     pub word_prefix_docids: FxHashMap<Interned<String>, Option<Cow<'ctx, [u8]>>>,
     pub exact_word_prefix_docids: FxHashMap<Interned<String>, Option<Cow<'ctx, [u8]>>>,
 
@@ -235,6 +236,27 @@ impl<'ctx> SearchContext<'ctx> {
                 self.index.word_docids.remap_data_type::<Bytes>(),
             ),
         }
+    }
+
+    /// Документы, где слово написано именно так.
+    ///
+    /// Отсюда правило exactness узнаёт, что документ содержит слово, а не другую
+    /// его форму: [`SearchContext::word_docids`] с двойной индексацией отвечает
+    /// и за лемму. Без словарей эта база — копия тех двух, так что пересечение
+    /// с ней ничего не меняет.
+    pub fn written_word_docids(
+        &mut self,
+        universe: Option<&RoaringBitmap>,
+        word: Interned<String>,
+    ) -> Result<Option<RoaringBitmap>> {
+        DatabaseCache::get_value(
+            self.txn,
+            word,
+            self.word_interner.get(word).as_str(),
+            &mut self.db_cache.written_word_docids,
+            universe,
+            self.index.written_word_docids.remap_data_type::<Bytes>(),
+        )
     }
 
     fn get_db_exact_word_docids(
