@@ -259,6 +259,160 @@ impl TempIndex {
     }
 }
 
+/// Штамп отвечает за весь индекс, а не за последнюю запись: слово, уложенное
+/// прежним бандлом, снимается из словарных баз только очисткой документов.
+#[test]
+fn a_stamp_outlives_the_documents_written_after_it() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use heed::types::{SerdeJson, Str};
+
+    use crate::index::main_key;
+    use crate::lemmatizer::{Stamp, WORD_LAYOUT};
+
+    let index = TempIndex::new();
+    index.add_documents(documents!([{ "id": 1, "text": "мама мыла раму" }])).unwrap();
+
+    // Словарей в тестах нет, и штамп прежнего бандла ставится руками — ровно
+    // такой, какой оставила бы заливка при нём.
+    let foreign = Stamp {
+        layouts: BTreeSet::from([WORD_LAYOUT]),
+        dictionaries: BTreeMap::from([(S("rus"), BTreeSet::from([S("gA")]))]),
+    };
+    let mut wtxn = index.write_txn().unwrap();
+    index
+        .main
+        .remap_types::<Str, SerdeJson<Stamp>>()
+        .put(&mut wtxn, main_key::LEMMATIZER_STAMP, &foreign)
+        .unwrap();
+    wtxn.commit().unwrap();
+
+    // Дозаливка документа объявить индекс собранным заново не вправе.
+    index.add_documents(documents!([{ "id": 2, "text": "рама" }])).unwrap();
+    let rtxn = index.read_txn().unwrap();
+    assert_eq!(index.lemmatizer_stamp(&rtxn).unwrap(), Some(foreign.clone()));
+    drop(rtxn);
+
+    // Правка и удаление — тоже записи, и тоже не перестройка.
+    index.add_documents(documents!([{ "id": 1, "text": "мама мыла окно" }])).unwrap();
+    index.delete_documents(vec![S("2")]);
+    let rtxn = index.read_txn().unwrap();
+    assert_eq!(index.lemmatizer_stamp(&rtxn).unwrap(), Some(foreign));
+    drop(rtxn);
+
+    // Очистка документов снимает слова прежнего бандла — и штамп вместе с ними.
+    let mut wtxn = index.write_txn().unwrap();
+    update::ClearDocuments::new(&mut wtxn, &index).execute().unwrap();
+    wtxn.commit().unwrap();
+    let rtxn = index.read_txn().unwrap();
+    assert_eq!(index.lemmatizer_stamp(&rtxn).unwrap(), Some(Stamp::default()));
+}
+
+/// База прошлой сборки читается на своём ключе, и раскладкой ей засчитывается
+/// нынешняя: ключ прошлого штампа появился в том же выпуске, что и она.
+#[test]
+fn the_stamp_of_the_previous_build_is_read_where_it_lies() {
+    use std::collections::BTreeSet;
+
+    use heed::types::{SerdeJson, Str};
+
+    use crate::index::main_key;
+    use crate::lemmatizer::{Generations, WORD_LAYOUT};
+
+    let index = TempIndex::new();
+    index.add_documents(documents!([{ "id": 1, "text": "мама мыла раму" }])).unwrap();
+
+    let previous: Generations = [(S("rus"), S("gA"))].into_iter().collect();
+    let mut wtxn = index.write_txn().unwrap();
+    index
+        .main
+        .remap_types::<Str, SerdeJson<Generations>>()
+        .put(&mut wtxn, main_key::LEMMATIZER_DICTIONARIES, &previous)
+        .unwrap();
+    index.main.remap_key_type::<Str>().delete(&mut wtxn, main_key::LEMMATIZER_STAMP).unwrap();
+    wtxn.commit().unwrap();
+
+    let rtxn = index.read_txn().unwrap();
+    let stamp = index.lemmatizer_stamp(&rtxn).unwrap().unwrap();
+    assert_eq!(stamp.layouts, BTreeSet::from([WORD_LAYOUT]));
+    assert_eq!(stamp.dictionaries.get("rus"), Some(&BTreeSet::from([S("gA")])));
+    drop(rtxn);
+
+    // Первая же запись переписывает его в нынешний вид, а прежний ключ сносит.
+    index.add_documents(documents!([{ "id": 2, "text": "рама" }])).unwrap();
+    let rtxn = index.read_txn().unwrap();
+    assert!(index
+        .main
+        .remap_types::<Str, SerdeJson<Generations>>()
+        .get(&rtxn, main_key::LEMMATIZER_DICTIONARIES)
+        .unwrap()
+        .is_none());
+    // Поколения прежней сборки при этом сохранены: слова, которые они уложили,
+    // никуда не делись, и объявлять индекс собранным заново не за что.
+    let stamp = index.lemmatizer_stamp(&rtxn).unwrap().unwrap();
+    assert_eq!(stamp.layouts, BTreeSet::from([WORD_LAYOUT]));
+    assert_eq!(stamp.dictionaries.get("rus"), Some(&BTreeSet::from([S("gA")])));
+}
+
+/// База без штампа — сток или сборка форка до штампов — открывается и читается,
+/// и штамп самого первого вида её не спасает: он называл бандл, а не индекс.
+#[test]
+fn a_database_without_a_stamp_reads_as_nothing_recorded() {
+    use heed::types::{SerdeJson, Str};
+
+    use crate::index::main_key;
+    use crate::lemmatizer::{Generations, Stamp, WordLayerRun};
+
+    let index = TempIndex::new();
+    index.add_documents(documents!([{ "id": 1, "text": "мама мыла раму" }])).unwrap();
+
+    let mut wtxn = index.write_txn().unwrap();
+    for key in [main_key::LEMMATIZER_STAMP, main_key::LEMMATIZER_DICTIONARIES] {
+        index.main.remap_key_type::<Str>().delete(&mut wtxn, key).unwrap();
+    }
+    wtxn.commit().unwrap();
+
+    let rtxn = index.read_txn().unwrap();
+    assert_eq!(index.lemmatizer_stamp(&rtxn).unwrap(), None);
+    // Без словарей такой базе предъявить нечего: эта сборка пишет то же самое.
+    assert_eq!(crate::lemmatizer::mismatch(None, index.number_of_documents(&rtxn).unwrap()), None);
+    drop(rtxn);
+
+    // Штамп самого первого вида перечислял весь бандл и об индексе не говорил
+    // ничего; читается такая база всё так же как «не записано».
+    let whole_bundle: Generations = [(S("rus"), S("gA")), (S("bre"), S("gA"))].into_iter().collect();
+    let mut wtxn = index.write_txn().unwrap();
+    index
+        .main
+        .remap_types::<Str, SerdeJson<Generations>>()
+        .put(&mut wtxn, main_key::LEMMATIZER_GENERATIONS, &whole_bundle)
+        .unwrap();
+    wtxn.commit().unwrap();
+    let rtxn = index.read_txn().unwrap();
+    assert_eq!(index.lemmatizer_stamp(&rtxn).unwrap(), None);
+    drop(rtxn);
+
+    // Первая же запись поверх непустого индекса записывает, что о его словах
+    // не известно ничего, и сносит штамп первого вида.
+    let mut wtxn = index.write_txn().unwrap();
+    index
+        .stamp_word_layer(
+            &mut wtxn,
+            &Default::default(),
+            WordLayerRun { filled_before: true, retokenized_everything: false },
+        )
+        .unwrap();
+    wtxn.commit().unwrap();
+    let rtxn = index.read_txn().unwrap();
+    assert_eq!(index.lemmatizer_stamp(&rtxn).unwrap(), Some(Stamp::unrecorded()));
+    assert!(index
+        .main
+        .remap_types::<Str, SerdeJson<Generations>>()
+        .get(&rtxn, main_key::LEMMATIZER_GENERATIONS)
+        .unwrap()
+        .is_none());
+}
+
 #[test]
 fn aborting_indexation() {
     let index = TempIndex::new();

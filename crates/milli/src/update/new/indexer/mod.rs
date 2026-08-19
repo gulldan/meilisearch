@@ -94,6 +94,9 @@ where
     // Окно открыто до первой токенизации: документы разбирают потоки этого
     // пула, и только они вправе сказать, какими словарями лёг индекс.
     let mut recording = crate::lemmatizer::Recording::open(pool);
+    // До первой записи: слова, которые старше этого прогона, есть только у
+    // индекса, в котором уже что-то лежало.
+    let filled_before = !index.documents_ids(wtxn)?.is_empty();
 
     let (extractor_sender, writer_receiver) = pool
         .install(|| extractor_writer_bbqueue(&mut bbbuffers, total_bbbuffer_capacity, 1000))
@@ -248,7 +251,11 @@ where
     // Stamped where documents are tokenized rather than inside `update_index`:
     // a settings update that needs no reindexing writes no word, and must not
     // claim the stored ones came from the dictionaries loaded now.
-    index.stamp_lemmatizer_generations(wtxn, &recording.languages())?;
+    index.stamp_word_layer(
+        wtxn,
+        &recording.languages(),
+        crate::lemmatizer::WordLayerRun { filled_before, retokenized_everything: false },
+    )?;
 
     Ok(congestion)
 }
@@ -311,6 +318,11 @@ where
     // Переиндексация по смене настроек перебирает документы заново, и языки
     // ей приходится узнавать тем же способом.
     let mut recording = crate::lemmatizer::Recording::open(pool);
+    let filled_before = !index.documents_ids(wtxn)?.is_empty();
+    // Разбор документов заново идёт ровно тогда, когда сменились настройки, по
+    // которым документ разбирается на слова, — тот же вопрос, по которому
+    // извлекатели решают, строить ли им второй токенизатор.
+    let retokenized_everything = settings_delta.retokenizes_documents();
 
     let (extractor_sender, writer_receiver) = pool
         .install(|| extractor_writer_bbqueue(&mut bbbuffers, total_bbbuffer_capacity, 1000))
@@ -470,7 +482,11 @@ where
         field_distribution,
         document_ids,
     )?;
-    index.stamp_lemmatizer_generations(wtxn, &recording.languages())?;
+    index.stamp_word_layer(
+        wtxn,
+        &recording.languages(),
+        crate::lemmatizer::WordLayerRun { filled_before, retokenized_everything },
+    )?;
 
     Ok(congestion)
 }

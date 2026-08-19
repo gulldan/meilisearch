@@ -252,6 +252,15 @@ where
         let pool = &self.indexer_config.thread_pool;
         // Старый путь токенизирует в том же пуле, и окно записи ему нужно то же.
         let mut recording = crate::lemmatizer::Recording::open(pool);
+        // Документы этот путь пишет позже, так что здесь ещё видно, что лежало
+        // в индексе до прогона.
+        let filled_before = !self.index.documents_ids(self.wtxn)?.is_empty();
+        // Переиндексация по настройкам разбирает каждый документ заново — и
+        // только она: заливка документов трогает лишь те, что в ней пришли.
+        let retokenized_everything = settings_diff.settings_update_only()
+            && crate::update::settings::SettingsDelta::retokenizes_documents(
+                settings_diff.as_ref(),
+            );
 
         // create LMDB writer channel
         let (lmdb_writer_sx, lmdb_writer_rx): (
@@ -493,7 +502,11 @@ where
 
         // Everything that reaches this indexer has just been tokenized.
         let applied = recording.languages();
-        self.index.stamp_lemmatizer_generations(self.wtxn, &applied)?;
+        self.index.stamp_word_layer(
+            self.wtxn,
+            &applied,
+            crate::lemmatizer::WordLayerRun { filled_before, retokenized_everything },
+        )?;
 
         // We write the primary key field id into the main database
         self.index.put_primary_key(self.wtxn, &primary_key)?;
