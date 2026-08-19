@@ -74,13 +74,18 @@ pub fn located_query_terms_from_tokens(
                 if let Some(phrase) = &mut phrase {
                     phrase.push_word(ctx, &token, position)
                 } else if negative_next_token {
-                    // Исключается набранное слово, а не то, во что его свёл
-                    // словарь: «-мыла» обязано убирать документ, где написано
-                    // «мыла», ровно как в стоке. Лемма этого документа лежит в
-                    // индексе рядом, но пользователь вычёркивал не её.
-                    let word = token.surface().unwrap_or_else(|| token.lemma()).to_string();
-                    let word = Word::Original(ctx.word_interner.insert(word));
-                    negative_words.push(word);
+                    // Снимается ровно то, что это же слово находит в
+                    // положительной позиции, — обе формы. Набранная: «-мыла»
+                    // обязано убирать документ, где написано «мыла», ровно как
+                    // в стоке. Лемма: по ней документ и нашёлся, а вычёркивают
+                    // его тем же словом, и оставлять его на экране нельзя.
+                    //
+                    // Словарь слово не менял — набранной формы нет, и в
+                    // отрицание идёт одно слово, как было.
+                    for writing in token.surface().into_iter().chain([token.lemma()]) {
+                        let word = Word::Original(ctx.word_interner.insert(writing.to_string()));
+                        negative_words.push(word);
+                    }
                     negative_next_token = false;
                 } else {
                     // Внутри запроса стоп-слова словом не ищутся, а последнее
