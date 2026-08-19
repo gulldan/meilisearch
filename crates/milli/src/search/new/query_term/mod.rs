@@ -485,6 +485,14 @@ impl QueryTerm {
     pub fn is_prefix(&self) -> bool {
         self.is_prefix
     }
+
+    /// Словарь заменил набранное слово леммой.
+    ///
+    /// Тогда формы терма начинаются уже не с набранного, и мерить совпадение их
+    /// длинами нельзя.
+    pub fn is_lemmatized(&self) -> bool {
+        self.lemma.is_some()
+    }
     pub fn original_word(&self, ctx: &SearchContext<'_>) -> String {
         ctx.word_interner.get(self.original).clone()
     }

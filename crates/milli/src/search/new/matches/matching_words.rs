@@ -19,6 +19,10 @@ pub struct LocatedMatchingWords {
     pub positions: RangeInclusive<WordId>,
     pub is_prefix: bool,
     pub original_char_count: usize,
+    /// Слово так, как его набрал пользователь.
+    pub original: String,
+    /// Словарь набранное слово заменил, и формы группы с него не начинаются.
+    pub is_lemmatized: bool,
 }
 
 /// Structure created from a query tree
@@ -49,11 +53,14 @@ impl MatchingWords {
                 });
             }
 
+            let original = term.original_word(&ctx);
             words.push(LocatedMatchingWords {
                 value: matching_words,
                 positions: located_term.positions.clone(),
                 is_prefix: term.is_prefix(),
-                original_char_count: term.original_word(&ctx).chars().count(),
+                original_char_count: original.chars().count(),
+                is_lemmatized: term.is_lemmatized(),
+                original,
             });
         }
 
@@ -70,7 +77,12 @@ impl MatchingWords {
 
     /// Returns an iterator over terms that match or partially match the given token.
     pub fn match_token<'a, 'b>(&'a self, token: &'b Token<'b>) -> MatchesIter<'a, 'b> {
-        MatchesIter { matching_words: self, phrases: Box::new(self.phrases.iter()), token }
+        MatchesIter {
+            matching_words: self,
+            phrases: Box::new(self.phrases.iter()),
+            token,
+            written: true,
+        }
     }
 
     /// Try to match the token with one of the located_words.
@@ -79,39 +91,78 @@ impl MatchingWords {
     /// и лемму, значит найтись документ мог по любой из них, — а подсветить
     /// нужно то же самое слово текста.
     fn match_unique_words<'a>(&'a self, token: &Token<'_>) -> Option<MatchType<'a>> {
+        self.match_word(token, false)
+    }
+
+    /// Совпадение с написанным словом — с тем, что видно в тексте.
+    ///
+    /// Спрашивается раньше фраз. Лемма лежит в индексе на месте написанного
+    /// слова, поэтому у неё есть пара с соседним словом, и фраза, собранная из
+    /// леммы и соседа, покрывает два слова текста разом: `чиновники`
+    /// разбивается на `чиновник` и `и`, и выделение заезжает на `и`. Границы
+    /// между ними в тексте нет; когда написанное само по себе слово запроса,
+    /// подсвечивается оно одно.
+    ///
+    /// Словарь слово не менял — написанной формы у токена нет, и метод молчит:
+    /// порядок остаётся ровно прежним.
+    fn match_written_word<'a>(&'a self, token: &Token<'_>) -> Option<MatchType<'a>> {
+        token.surface()?;
+        self.match_word(token, true)
+    }
+
+    /// Ищет слово документа среди форм запроса и меряет, сколько его закрыто.
+    ///
+    /// Слово документа берётся в двух написаниях: как написано и как записал
+    /// словарь. Подойти могло любое, `written_only` оставляет одно написанное.
+    ///
+    /// А меряется совпадение всегда по написанному: пользователь видит текст, а
+    /// не словарь. Слово ещё дописывают — подсвечивается ровно набранное,
+    /// `экран` в `[экран]е`, как в стоке. Набранного в слове нет, подошла
+    /// словарная форма — слово открывается целиком: `экрана` не начинает
+    /// `экране`, `люди` не начинают `человека`, и границы внутри слова, по
+    /// которой их резать, не существует.
+    ///
+    /// Когда ни слово запроса, ни слово документа словарь не менял, обе формы
+    /// совпадают с написанным, и остаётся ровно прежний путь.
+    fn match_word<'a>(&'a self, token: &Token<'_>, written_only: bool) -> Option<MatchType<'a>> {
+        let whole = (token.char_end - token.char_start, token.byte_end - token.byte_start);
+        let written = token.surface();
+        let lemma = (!written_only).then(|| token.lemma());
+        // Слово документа так, как оно стоит в тексте, и его же карта символов.
+        let as_written = written.unwrap_or_else(|| token.lemma());
+        let measure = |prefix_length| match written {
+            Some(_) => token.surface_lengths(prefix_length),
+            None => token.original_lengths(prefix_length),
+        };
+
         for located_words in &self.words {
-            // Приставка. Совпасть могли обе формы; спрашивается сначала
-            // набранная, потому что она и есть то, что видно в тексте, и мерить
-            // такое совпадение надо по ней. Когда словарь слово не менял,
-            // набранной формы нет вовсе и остаётся ровно прежний путь.
-            if located_words.is_prefix {
-                let matched = token
-                    .surface()
-                    .and_then(|surface| {
-                        self.typed_prefix_len(located_words, |word| surface.starts_with(word))
-                    })
-                    .map(|prefix_length| token.surface_lengths(prefix_length))
-                    .or_else(|| {
-                        self.typed_prefix_len(located_words, |word| token.lemma().starts_with(word))
-                            .map(|prefix_length| token.original_lengths(prefix_length))
-                    });
+            for form in [written, lemma] {
+                let Some(form) = form else { continue };
+
+                let matched = if located_words.is_prefix {
+                    self.typed_prefix_len(located_words, |word| form.starts_with(word)).map(
+                        |typed_length| {
+                            if !located_words.is_lemmatized && written.is_none() {
+                                token.original_lengths(typed_length)
+                            } else if as_written.starts_with(&located_words.original) {
+                                measure(located_words.original.len())
+                            } else {
+                                whole
+                            }
+                        },
+                    )
+                // else we exact match the token.
+                } else {
+                    located_words
+                        .value
+                        .iter()
+                        .any(|word| self.word_interner.get(*word).as_str() == form)
+                        .then_some(whole)
+                };
 
                 if let Some((char_count, byte_len)) = matched {
                     let ids = &located_words.positions;
                     return Some(MatchType::Full { ids, char_count, byte_len });
-                }
-            // else we exact match the token.
-            } else {
-                for word in &located_words.value {
-                    let word = self.word_interner.get(*word).as_str();
-                    if token.lemma() == word || token.surface() == Some(word) {
-                        let ids = &located_words.positions;
-                        return Some(MatchType::Full {
-                            char_count: token.char_end - token.char_start,
-                            byte_len: token.byte_end - token.byte_start,
-                            ids,
-                        });
-                    }
                 }
             }
         }
@@ -153,12 +204,22 @@ pub struct MatchesIter<'a, 'b> {
     matching_words: &'a MatchingWords,
     phrases: Box<dyn Iterator<Item = &'a LocatedMatchingPhrase> + 'a>,
     token: &'b Token<'b>,
+    /// Написанное слово ещё не спрашивали.
+    written: bool,
 }
 
 impl<'a> Iterator for MatchesIter<'a, '_> {
     type Item = MatchType<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Написанное слово идёт первым: фраза, начатая с леммы, склеила бы его
+        // с соседним.
+        if std::mem::take(&mut self.written) {
+            if let Some(match_type) = self.matching_words.match_written_word(self.token) {
+                return Some(match_type);
+            }
+        }
+
         match self.phrases.next() {
             // Try to match all the phrases first.
             Some(located_phrase) => {
@@ -366,9 +427,9 @@ pub(crate) mod tests {
                 .next(),
             Some(MatchType::Full { char_count: 5, byte_len: 5, ids: &(2..=2) })
         );
-        // Написанное «worlded» словарь свёл к «worried»: общее у форм только
-        // «wor», и совпадение с набранным «world» приходит от написанного.
-        // Мерить его надо по написанному — пять символов, а не всё слово.
+        // Написанное «worlded» словарь свёл к «worried». Набранное «world»
+        // начинает написанное, значит слово ещё дописывают: подсвечено ровно
+        // набранное, пять символов, а не всё слово.
         assert_eq!(
             matching_words
                 .match_token(&Token {
@@ -392,8 +453,8 @@ pub(crate) mod tests {
                 .next(),
             Some(MatchType::Full { char_count: 5, byte_len: 5, ids: &(2..=2) })
         );
-        // А совпадение, дошедшее до расходящегося хвоста леммы, по-прежнему
-        // открывает слово целиком: такой границы в тексте нет.
+        // А написанное «wordless» с набранного «world» не начинается — резать
+        // его негде, и слово открывается целиком.
         assert_eq!(
             matching_words
                 .match_token(&Token {
