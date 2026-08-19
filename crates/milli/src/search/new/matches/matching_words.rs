@@ -79,35 +79,68 @@ impl MatchingWords {
     /// и лемму, значит найтись документ мог по любой из них, — а подсветить
     /// нужно то же самое слово текста.
     fn match_unique_words<'a>(&'a self, token: &Token<'_>) -> Option<MatchType<'a>> {
-        let starts_with = |word: &str| {
-            token.lemma().starts_with(word)
-                || token.surface().is_some_and(|surface| surface.starts_with(word))
-        };
-        let equals = |word: &str| token.lemma() == word || token.surface() == Some(word);
         for located_words in &self.words {
-            for word in &located_words.value {
-                let word = self.word_interner.get(*word);
-                // if the word is a prefix we match using starts_with.
-                if located_words.is_prefix && starts_with(word) {
-                    let Some((char_index, c)) =
-                        word.char_indices().take(located_words.original_char_count).last()
-                    else {
-                        continue;
-                    };
-                    let prefix_length = char_index + c.len_utf8();
-                    let (char_count, byte_len) = token.original_lengths(prefix_length);
+            // Приставка. Совпасть могли обе формы; спрашивается сначала
+            // набранная, потому что она и есть то, что видно в тексте, и мерить
+            // такое совпадение надо по ней. Когда словарь слово не менял,
+            // набранной формы нет вовсе и остаётся ровно прежний путь.
+            if located_words.is_prefix {
+                let matched = token
+                    .surface()
+                    .and_then(|surface| {
+                        self.typed_prefix_len(located_words, |word| surface.starts_with(word))
+                    })
+                    .map(|prefix_length| token.surface_lengths(prefix_length))
+                    .or_else(|| {
+                        self.typed_prefix_len(located_words, |word| token.lemma().starts_with(word))
+                            .map(|prefix_length| token.original_lengths(prefix_length))
+                    });
+
+                if let Some((char_count, byte_len)) = matched {
                     let ids = &located_words.positions;
                     return Some(MatchType::Full { ids, char_count, byte_len });
-                // else we exact match the token.
-                } else if equals(word) {
-                    let ids = &located_words.positions;
-                    return Some(MatchType::Full {
-                        char_count: token.char_end - token.char_start,
-                        byte_len: token.byte_end - token.byte_start,
-                        ids,
-                    });
+                }
+            // else we exact match the token.
+            } else {
+                for word in &located_words.value {
+                    let word = self.word_interner.get(*word).as_str();
+                    if token.lemma() == word || token.surface() == Some(word) {
+                        let ids = &located_words.positions;
+                        return Some(MatchType::Full {
+                            char_count: token.char_end - token.char_start,
+                            byte_len: token.byte_end - token.byte_start,
+                            ids,
+                        });
+                    }
                 }
             }
+        }
+
+        None
+    }
+
+    /// Сколько байтов набранного пользователем покрыло первое подошедшее слово
+    /// группы.
+    ///
+    /// Слова группы — это выведенные из запроса формы, целиком; набрано из них
+    /// столько символов, сколько стоит в `original_char_count`. Столько и
+    /// считается совпавшим.
+    fn typed_prefix_len(
+        &self,
+        located_words: &LocatedMatchingWords,
+        matches: impl Fn(&str) -> bool,
+    ) -> Option<usize> {
+        for word in &located_words.value {
+            let word = self.word_interner.get(*word);
+            if !matches(word) {
+                continue;
+            }
+            let Some((char_index, c)) =
+                word.char_indices().take(located_words.original_char_count).last()
+            else {
+                continue;
+            };
+            return Some(char_index + c.len_utf8());
         }
 
         None
@@ -332,6 +365,67 @@ pub(crate) mod tests {
                 })
                 .next(),
             Some(MatchType::Full { char_count: 5, byte_len: 5, ids: &(2..=2) })
+        );
+        // Написанное «worlded» словарь свёл к «worried»: общее у форм только
+        // «wor», и совпадение с набранным «world» приходит от написанного.
+        // Мерить его надо по написанному — пять символов, а не всё слово.
+        assert_eq!(
+            matching_words
+                .match_token(&Token {
+                    kind: TokenKind::Word,
+                    lemma: Cow::Borrowed("worried"),
+                    surface: Some(Cow::Borrowed("worlded")),
+                    char_map: Some(vec![(1, 1), (1, 1), (1, 1), (1, 0), (1, 0), (1, 0), (1, 4)]),
+                    surface_char_map: Some(vec![
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        (1, 1)
+                    ]),
+                    char_end: "worlded".chars().count(),
+                    byte_end: "worlded".len(),
+                    ..Default::default()
+                })
+                .next(),
+            Some(MatchType::Full { char_count: 5, byte_len: 5, ids: &(2..=2) })
+        );
+        // А совпадение, дошедшее до расходящегося хвоста леммы, по-прежнему
+        // открывает слово целиком: такой границы в тексте нет.
+        assert_eq!(
+            matching_words
+                .match_token(&Token {
+                    kind: TokenKind::Word,
+                    lemma: Cow::Borrowed("world"),
+                    surface: Some(Cow::Borrowed("wordless")),
+                    char_map: Some(vec![
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        (1, 0),
+                        (1, 0),
+                        (1, 0),
+                        (1, 0),
+                        (1, 2)
+                    ]),
+                    surface_char_map: Some(vec![
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        (1, 1)
+                    ]),
+                    char_end: "wordless".chars().count(),
+                    byte_end: "wordless".len(),
+                    ..Default::default()
+                })
+                .next(),
+            Some(MatchType::Full { char_count: 8, byte_len: 8, ids: &(2..=2) })
         );
         assert_eq!(
             matching_words
