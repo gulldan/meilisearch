@@ -8,7 +8,7 @@ use meilisearch_types::heed::{Database, Env, RoTxn, RwTxn, WithoutTls};
 use meilisearch_types::index_uid::{AnyIndex, DsrIndex, UserIndex, RESERVED_UID_PREFIX};
 use meilisearch_types::milli::database_stats::DatabaseStats;
 use meilisearch_types::milli::index::RollbackOutcome;
-use meilisearch_types::milli::lemmatizer::Generations;
+use meilisearch_types::milli::lemmatizer::Stamp;
 use meilisearch_types::milli::sharding::Shards;
 use meilisearch_types::milli::update::IndexerConfig;
 use meilisearch_types::milli::{self, CreateOrOpen, FieldDistribution, Index};
@@ -137,14 +137,16 @@ pub struct IndexStats {
     pub primary_key: Option<String>,
     /// Association of every field name with the number of times it occurs in the documents.
     pub field_distribution: FieldDistribution,
-    /// Generation of every lemmatizer dictionary that filled the index, keyed by
-    /// ISO 639-3 code. `None` for an index last written before they were
-    /// recorded, empty for one filled without dictionaries.
+    /// What laid down the words of this index: the layouts and the dictionary
+    /// generations. `None` for an index last written before it was recorded,
+    /// empty for one filled without dictionaries.
     ///
     /// Только языки этого индекса: бандл целиком тут не при чём, и весит это
-    /// столько же, сколькими языками индекс на самом деле уложен.
-    #[serde(default)]
-    pub lemmatizer_generations: Option<Generations>,
+    /// столько же, сколькими языками индекс на самом деле уложен. Прежнее имя
+    /// поля читается тем же типом — сохранённая статистика прошлой сборки
+    /// переживает обновление и не выглядит незаполненной.
+    #[serde(default, alias = "lemmatizer_generations")]
+    pub lemmatizer_stamp: Option<Stamp>,
     /// Creation date of the index.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -182,7 +184,7 @@ impl IndexStats {
             used_database_size: index.used_size()?,
             primary_key: index.primary_key(rtxn)?.map(|s| s.to_string()),
             field_distribution: index.field_distribution(rtxn)?,
-            lemmatizer_generations: index.lemmatizer_generations(rtxn)?,
+            lemmatizer_stamp: index.lemmatizer_stamp(rtxn)?,
             created_at: index.created_at(rtxn)?,
             updated_at: index.updated_at(rtxn)?,
         })
@@ -491,7 +493,7 @@ impl IndexMapper {
         };
 
         index
-            .check_lemmatizer_generations(name, uuid)
+            .check_word_layer(name, uuid)
             .map_err(|error| Error::from_milli(error, Some(name.to_string())))?;
 
         Ok(index)
@@ -650,6 +652,31 @@ impl IndexMapper {
                     .map_err(|e| Error::from_milli(e, Some(uuid.to_string())))
             }
         }
+    }
+
+    /// Проходит по сохранённой статистике и говорит вслух об индексах, чей
+    /// словарный слой уложен не этой сборкой.
+    ///
+    /// Индексы при этом не открываются: чем уложен каждый из них, записано в
+    /// той же статистике, которую отдаёт `GET /stats`, а открывать разом все
+    /// индексы ради предупреждения — дороже самого предупреждения. Индекс без
+    /// сохранённой статистики дождётся проверки при первом обращении.
+    pub fn report_word_layers(&self, rtxn: &RoTxn) -> Result<()> {
+        for entry in self.index_mapping.iter(rtxn)? {
+            let (uid, uuid) = entry?;
+            // Служебные индексы наполняет сам Meilisearch, и словарями их не
+            // трогают: оператору о них сказать нечего.
+            if uid.starts_with(RESERVED_UID_PREFIX) {
+                continue;
+            }
+            let Some(stats) = self.index_stats.get(rtxn, &uuid)? else { continue };
+            let documents = stats
+                .number_of_documents
+                .unwrap_or_else(|| stats.documents_database_stats.number_of_entries());
+            milli::lemmatizer::check_index(uid, uuid, || Ok((stats.lemmatizer_stamp, documents)))
+                .map_err(|error| Error::from_milli(error, Some(uid.to_string())))?;
+        }
+        Ok(())
     }
 
     /// Stores the new stats for an index.

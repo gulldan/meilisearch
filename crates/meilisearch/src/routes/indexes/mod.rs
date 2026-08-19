@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 
 use actix_web::web::Data;
@@ -603,10 +603,20 @@ pub struct IndexStats {
     /// recorded, empty for one filled without dictionaries.
     ///
     /// Перечислены языки этого индекса, а не весь загруженный бандл: иначе
-    /// каждый индекс приписывал бы к ответу десятки чужих строк.
+    /// каждый индекс приписывал бы к ответу десятки чужих строк. Поколений у
+    /// языка больше одного, когда индекс наполняли при разных бандлах, — и
+    /// это ровно тот случай, когда его пора собрать заново.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<HashMap<String, String>>)]
-    pub lemmatizer_generations: Option<milli::lemmatizer::Generations>,
+    #[schema(value_type = Option<HashMap<String, Vec<String>>>)]
+    pub lemmatizer_generations: Option<BTreeMap<String, BTreeSet<String>>>,
+    /// Why the words of this index are not what this build would have laid
+    /// down: a swapped dictionary bundle, another word layout, or a database
+    /// written before either was recorded. Reindex the index to clear it.
+    ///
+    /// Поля нет у индекса, к которому претензий нет: здоровый индекс не платит
+    /// за него ни байтом ответа.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lemmatizer_mismatch: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserr, ToSchema)]
@@ -641,13 +651,19 @@ impl IndexStats {
                     field_distribution,
                     created_at: _,
                     updated_at: _,
-                    lemmatizer_generations,
+                    lemmatizer_stamp,
                 },
         } = db_index_stats;
 
+        let number_of_documents =
+            number_of_documents.unwrap_or(documents_database_stats.number_of_entries());
+        // Считается на месте ответа, а не при сохранении статистики: расходится
+        // индекс не сам с собой, а с бандлом, который загружен прямо сейчас.
+        let lemmatizer_mismatch =
+            milli::lemmatizer::mismatch(lemmatizer_stamp.as_ref(), number_of_documents);
+
         Self {
-            number_of_documents: number_of_documents
-                .unwrap_or(documents_database_stats.number_of_entries()),
+            number_of_documents,
             index_size: Size::new(database_size, format),
             used_index_size: Size::new(used_database_size, format),
             raw_document_db_size: Size::new(documents_database_stats.total_size(), format),
@@ -664,7 +680,8 @@ impl IndexStats {
             number_of_embeddings,
             number_of_embedded_documents,
             field_distribution,
-            lemmatizer_generations,
+            lemmatizer_generations: lemmatizer_stamp.map(|stamp| stamp.dictionaries),
+            lemmatizer_mismatch,
         }
     }
 }

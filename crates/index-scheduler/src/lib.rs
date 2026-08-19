@@ -1132,6 +1132,15 @@ impl IndexScheduler {
         });
     }
 
+    /// Говорит вслух об индексах, чей словарный слой уложен не этой сборкой.
+    ///
+    /// Зовётся на старте: подмена образа или бандла видна оператору сразу, а
+    /// не при первом обращении к каждому индексу поодиночке.
+    pub fn report_word_layers(&self) -> Result<()> {
+        let rtxn = self.read_txn()?;
+        self.index_mapper.report_word_layers(&rtxn)
+    }
+
     pub fn user_index_stats(&self, index_uid: &str) -> Result<IndexStats> {
         let index_uid = UserIndex::try_from_uid(index_uid)?;
 

@@ -408,6 +408,13 @@ pub fn setup_meilisearch(
         open_or_create_database(opt, index_scheduler_opt, empty_db, binary_version, handle)?
     };
 
+    // Подмена образа или бандла видна оператору здесь, до первого запроса:
+    // индекс, уложенный не этой сборкой, ищется хуже собранного заново, и
+    // узнавать об этом по просевшей полноте — поздно.
+    if let Err(error) = index_scheduler.report_word_layers() {
+        tracing::warn!("could not check what filled the indexes: {error}");
+    }
+
     // We create a loop in a thread that registers snapshotCreation tasks
     let index_scheduler = Arc::new(index_scheduler);
     let auth_controller = Arc::new(auth_controller);
