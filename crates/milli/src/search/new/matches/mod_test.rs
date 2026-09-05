@@ -463,6 +463,43 @@ fn smaller_crop_size() {
 }
 
 #[test]
+fn crop_smaller_than_a_phrase_ending_the_field() {
+    //! Same phrase and crop as in `format_highlight_crop_phrase_query`, except
+    //! the field ends where the phrase ends. A phrase counts as a single match,
+    //! so when it is longer than the crop size the window is grown backwards,
+    //! and there is no token past the match to start from.
+    let temp_index = TempIndex::new();
+
+    let text = "The groundbreaking invention had the power to split the world";
+    temp_index
+        .add_documents(documents!([
+            { "id": 1, "text": text }
+        ]))
+        .unwrap();
+
+    let rtxn = temp_index.read_txn().unwrap();
+    let builder = MatcherBuilder::new_test(
+        &rtxn,
+        &temp_index,
+        "\"The groundbreaking invention had the power to split the world\"",
+    );
+
+    let format_options = FormatOptions { highlight: false, crop: Some(5) };
+    let mut matcher = builder.build(text, None);
+    insta::assert_snapshot!(
+        matcher.format(format_options),
+        @"The groundbreaking invention had the…"
+    );
+
+    let format_options = FormatOptions { highlight: false, crop: Some(1) };
+    let mut matcher = builder.build(text, None);
+    insta::assert_snapshot!(
+        matcher.format(format_options),
+        @"The…"
+    );
+}
+
+#[test]
 fn partial_matches() {
     let temp_index = temp_index_with_documents();
     let rtxn = temp_index.read_txn().unwrap();
