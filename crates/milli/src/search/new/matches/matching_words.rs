@@ -125,6 +125,12 @@ impl MatchingWords {
     /// Когда ни слово запроса, ни слово документа словарь не менял, обе формы
     /// совпадают с написанным, и остаётся ровно прежний путь.
     fn match_word<'a>(&'a self, token: &Token<'_>, written_only: bool) -> Option<MatchType<'a>> {
+        // Стоп-слово не подсвечивается (апстрим #6594). У них это `continue`
+        // на каждом слове группы, что равносильно «не совпало ни с чем»; здесь
+        // формы перебираются иначе, поэтому тот же смысл — ранний возврат.
+        if token.is_stopword() {
+            return None;
+        }
         let whole = (token.char_end - token.char_start, token.byte_end - token.byte_start);
         let written = token.surface();
         let lemma = (!written_only).then(|| token.lemma());

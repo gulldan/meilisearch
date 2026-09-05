@@ -123,6 +123,7 @@ make_locale!(
     (Cy, "cy") => (Cym, "cym"),
     (Da, "da") => (Dan, "dan"),
     (De, "de") => (Deu, "deu"),
+    (Cy, "cy") => (Cym, "cym"),
     (El, "el") => (Ell, "ell"),
     (En, "en") => (Eng, "eng"),
     (Eo, "eo") => (Epo, "epo"),
