@@ -142,14 +142,22 @@ impl MatchingWords {
         };
 
         for located_words in &self.words {
-            for form in [written, lemma] {
+            for (form, form_is_written) in [(written, true), (lemma, written.is_none())] {
                 let Some(form) = form else { continue };
 
                 let matched = if located_words.is_prefix {
                     self.typed_prefix_len(located_words, |word| form.starts_with(word)).map(
                         |typed_length| {
-                            if !located_words.is_lemmatized && written.is_none() {
-                                token.original_lengths(typed_length)
+                            // Словарь слово документа не менял: лемма и есть
+                            // текст. Совпавший префикс тогда отмеряется по нему
+                            // честно — и когда слово запроса словарь заменил
+                            // тоже. Иначе токен, в котором слово не одно
+                            // («гороскоп⚡️новини» — один токен, эмодзи не
+                            // разделяет), открывался бы целиком.
+                            if form_is_written {
+                                // Совпало с тем, что стоит в тексте: сколько
+                                // байтов подошло, столько и подсвечиваем.
+                                measure(typed_length)
                             } else if as_written.starts_with(&located_words.original) {
                                 measure(located_words.original.len())
                             } else {
@@ -187,6 +195,12 @@ impl MatchingWords {
         located_words: &LocatedMatchingWords,
         matches: impl Fn(&str) -> bool,
     ) -> Option<usize> {
+        // Самое короткое подошедшее, а не первое попавшееся. Эмодзи слова не
+        // разделяет, поэтому «гороскоп⚡️новини» — один токен и одно слово
+        // индекса; префиксом токена оказываются и лемма, и он сам, и по
+        // длинному подсветка растянулась бы за слово, разрывая «⚡️» между
+        // знаком и селектором U+FE0F.
+        let mut shortest = None;
         for word in &located_words.value {
             let word = self.word_interner.get(*word);
             if !matches(word) {
@@ -197,10 +211,13 @@ impl MatchingWords {
             else {
                 continue;
             };
-            return Some(char_index + c.len_utf8());
+            let length = char_index + c.len_utf8();
+            if shortest.is_none_or(|shortest| length < shortest) {
+                shortest = Some(length);
+            }
         }
 
-        None
+        shortest
     }
 }
 

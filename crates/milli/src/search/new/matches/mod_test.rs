@@ -463,27 +463,41 @@ fn smaller_crop_size() {
 }
 
 #[test]
-fn smaller_crop_size_at_the_end() {
-    let temp_index = temp_index_with_documents();
+fn crop_smaller_than_a_phrase_ending_the_field() {
+    //! Фраза считается одним совпадением. Когда она длиннее crop и заканчивает
+    //! поле, окно обрезки растёт назад от позиции сразу за последним токеном —
+    //! а она равна длине списка токенов, и inclusive-срез читал за конец.
+    //!
+    //! Обычным запросом эта ветка не достигается: совпадений тогда несколько,
+    //! find_best_match_interval укладывает их в crop, и берётся ветка «вперёд».
+    let temp_index = TempIndex::new();
+
+    let text = "The groundbreaking invention had the power to split the world";
+    temp_index
+        .add_documents(documents!([
+            { "id": 1, "text": text }
+        ]))
+        .unwrap();
+
     let rtxn = temp_index.read_txn().unwrap();
-    let builder = MatcherBuilder::new_test(&rtxn, &temp_index, "split the world");
+    let builder = MatcherBuilder::new_test(
+        &rtxn,
+        &temp_index,
+        "\"The groundbreaking invention had the power to split the world\"",
+    );
 
-    // The match ends on the last token of the text, so the crop window has nothing
-    // to step onto past it.
-    let text = "void void split the world";
-
-    let format_options = FormatOptions { highlight: false, crop: Some(2) };
+    let format_options = FormatOptions { highlight: false, crop: Some(5) };
     let mut matcher = builder.build(text, None);
     insta::assert_snapshot!(
         matcher.format(format_options),
-        @"…split the…"
+        @"The groundbreaking invention had the…"
     );
 
     let format_options = FormatOptions { highlight: false, crop: Some(1) };
     let mut matcher = builder.build(text, None);
     insta::assert_snapshot!(
         matcher.format(format_options),
-        @"…split…"
+        @"The…"
     );
 }
 
