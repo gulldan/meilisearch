@@ -463,6 +463,31 @@ fn smaller_crop_size() {
 }
 
 #[test]
+fn smaller_crop_size_at_the_end() {
+    let temp_index = temp_index_with_documents();
+    let rtxn = temp_index.read_txn().unwrap();
+    let builder = MatcherBuilder::new_test(&rtxn, &temp_index, "split the world");
+
+    // The match ends on the last token of the text, so the crop window has nothing
+    // to step onto past it.
+    let text = "void void split the world";
+
+    let format_options = FormatOptions { highlight: false, crop: Some(2) };
+    let mut matcher = builder.build(text, None);
+    insta::assert_snapshot!(
+        matcher.format(format_options),
+        @"…split the…"
+    );
+
+    let format_options = FormatOptions { highlight: false, crop: Some(1) };
+    let mut matcher = builder.build(text, None);
+    insta::assert_snapshot!(
+        matcher.format(format_options),
+        @"…split…"
+    );
+}
+
+#[test]
 fn partial_matches() {
     let temp_index = temp_index_with_documents();
     let rtxn = temp_index.read_txn().unwrap();

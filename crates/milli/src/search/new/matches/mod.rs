@@ -322,7 +322,14 @@ impl<'t> Matcher<'t, '_, '_, '_> {
             Either::Left(tokens[after_tokens_starting_index..].iter().peekable())
         } else {
             // ... starting from the last match token position and going towards the start of the text.
-            Either::Right(tokens[..=after_tokens_starting_index].iter().rev().peekable())
+            // A match can end on the last token of the field, and then the starting index is the
+            // length of the slice itself, which an inclusive range would read one past.
+            Either::Right(
+                tokens[..(after_tokens_starting_index + 1).min(tokens.len())]
+                    .iter()
+                    .rev()
+                    .peekable(),
+            )
         };
 
         // grows the crop window peeking in both directions
